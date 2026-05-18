@@ -22,12 +22,18 @@ on:
         type: string
         required: false
         default: v2.31.0
+    outputs:
+      version:
+        description: 'The version produced, or empty if no release was cut.'
+        value: ${{ jobs.release.outputs.version }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout (full history and tags)
         uses: actions/checkout@v4
@@ -55,6 +61,10 @@ jobs:
             set -- "$@" --changelog CHANGELOG.md --prepend-changelog
           fi
           ./semantic-release "$@"
+
+      - name: Expose version
+        id: version
+        run: '[ -f .version ] && echo "version=$(cat .version)" >> "$GITHUB_OUTPUT" || true'
 
       - name: Commit changelog
         if: inputs.changelog
