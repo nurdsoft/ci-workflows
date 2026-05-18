@@ -1,0 +1,70 @@
+name: release
+
+# Reusable release pipeline. Generic and environment-agnostic: it runs
+# go-semantic-release with the options it is given. It has no knowledge of any
+# branch or environment. The calling repo decides, per branch, whether a run is
+# a stable release or an rc prerelease.
+on:
+  workflow_call:
+    inputs:
+      maintained-version:
+        description: 'rc prerelease line passed to go-semantic-release (e.g. 1-rc). Empty produces a stable release.'
+        type: string
+        required: false
+        default: ''
+      changelog:
+        description: 'Generate CHANGELOG.md and commit it back to the branch.'
+        type: boolean
+        required: false
+        default: false
+      semrel-version:
+        description: 'go-semantic-release binary version.'
+        type: string
+        required: false
+        default: v2.31.0
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (full history and tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install go-semantic-release
+        env:
+          SEMREL_VERSION: ${{ inputs.semrel-version }}
+        run: |
+          curl -sSL "https://github.com/go-semantic-release/semantic-release/releases/download/${SEMREL_VERSION}/semantic-release_${SEMREL_VERSION}_linux_amd64" -o ./semantic-release
+          chmod +x ./semantic-release
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_LINE: ${{ inputs.maintained-version }}
+          WITH_CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -- --token "$GH_TOKEN" --version-file --allow-no-changes
+          if [ -n "$RC_LINE" ]; then
+            set -- "$@" --prerelease --maintained-version "$RC_LINE"
+          fi
+          if [ "$WITH_CHANGELOG" = "true" ]; then
+            set -- "$@" --changelog CHANGELOG.md --prepend-changelog
+          fi
+          ./semantic-release "$@"
+
+      - name: Commit changelog
+        if: inputs.changelog
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -f .version ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git diff --staged --quiet || git commit -m "docs: update changelog for v$(cat .version) [skip ci]"
+            git push origin "HEAD:$BRANCH"
+          fi
