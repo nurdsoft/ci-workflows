@@ -1,4 +1,4 @@
-name: release
+name: Release
 
 # Reusable release pipeline. Generic and environment-agnostic: it runs
 # go-semantic-release with the options it is given. It has no knowledge of any
@@ -29,6 +29,7 @@ on:
 
 jobs:
   release:
+    name: Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -36,7 +37,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout (full history and tags)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
