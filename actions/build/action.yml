@@ -13,9 +13,17 @@ inputs:
     required: false
     default: "20"
   app-version:
-    description: Version string injected into the build as NEXT_PUBLIC_APP_VERSION.
+    description: Version string injected into the build as the value of `version-env-var`.
     required: false
     default: ""
+  version-env-var:
+    description: Name of the environment variable that receives `app-version` during the build.
+    required: false
+    default: NEXT_PUBLIC_APP_VERSION
+  build-output-path:
+    description: Path of the build output directory uploaded as the artifact.
+    required: false
+    default: out
   artifact-name:
     description: Name of the uploaded build-output artifact.
     required: false
@@ -52,12 +60,18 @@ runs:
     - name: Build
       shell: bash
       env:
-        NEXT_PUBLIC_APP_VERSION: ${{ inputs.app-version }}
-      run: make build ENV=${{ inputs.env }}
+        APP_VERSION_VAR: ${{ inputs.version-env-var }}
+        APP_VERSION_VAL: ${{ inputs.app-version }}
+        ENV: ${{ inputs.env }}
+      run: |
+        if [ -n "$APP_VERSION_VAR" ]; then
+          export "$APP_VERSION_VAR=$APP_VERSION_VAL"
+        fi
+        make build ENV="$ENV"
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
-        path: out
+        path: ${{ inputs.build-output-path }}
         retention-days: ${{ inputs.artifact-retention-days }}

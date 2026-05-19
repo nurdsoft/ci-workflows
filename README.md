@@ -97,7 +97,9 @@ owns the job DAG (`needs:` / `if:`), triggers and permissions.
 | ----- | -------- | ------- | ------- |
 | `env` | yes | — | Target environment for the build. |
 | `node-version` | no | `20` | Node.js version. |
-| `app-version` | no | `''` | Injected as `NEXT_PUBLIC_APP_VERSION`. |
+| `app-version` | no | `''` | Version string injected into the build (as the env var named by `version-env-var`). |
+| `version-env-var` | no | `NEXT_PUBLIC_APP_VERSION` | Name of the env var that receives `app-version`. |
+| `build-output-path` | no | `out` | Build output directory uploaded as the artifact. |
 | `artifact-name` | no | `build-output` | Name of the uploaded artifact. |
 | `artifact-retention-days` | no | `7` | Artifact retention. |
 
@@ -106,11 +108,16 @@ owns the job DAG (`needs:` / `if:`), triggers and permissions.
 | Input | Required | Default | Purpose |
 | ----- | -------- | ------- | ------- |
 | `env` | yes | — | Target environment for the deploy. |
-| `wif-provider` | yes | — | Workload Identity Federation provider resource name. |
-| `wif-service-account` | yes | — | Service account impersonated via WIF. |
+| `wif-provider` | no | `''` | GCP WIF provider resource name. Empty skips GCP auth. |
+| `wif-service-account` | no | `''` | Service account impersonated via WIF. Required when `wif-provider` is set. |
+| `aws-role-arn` | no | `''` | AWS IAM role to assume via OIDC. Empty skips AWS auth. |
+| `aws-region` | no | `''` | AWS region for the assumed role. Required when `aws-role-arn` is set. |
 | `artifact-name` | no | `build-output` | Artifact to download. |
+| `build-output-path` | no | `out` | Local path the artifact is unpacked to. |
 | `app-url` | no | `''` | Public URL shown in the run summary. |
 | `app-version` | no | `''` | Version shown in the run summary. |
+
+The caller passes whichever cloud auth applies; the unused auth step is skipped automatically.
 
 ### `infra-plan`
 
@@ -119,8 +126,8 @@ owns the job DAG (`needs:` / `if:`), triggers and permissions.
 | `env` | yes | — | Target environment for the Terraform run. |
 | `target` | no | `app` | Terraform target directory under `deploy/`. |
 | `tf-version` | no | `1.x` | Terraform version. |
-| `wif-provider` | yes | — | WIF provider resource name. |
-| `wif-service-account` | yes | — | Service account impersonated via WIF. |
+| `wif-provider` | no | `''` | GCP WIF provider resource name. Empty skips GCP auth. |
+| `wif-service-account` | no | `''` | Service account impersonated via WIF. Required when `wif-provider` is set. |
 | `aws-role-arn` | no | `''` | IAM role to assume via OIDC. Empty skips AWS auth. |
 | `aws-region` | no | `''` | Region for the assumed role. |
 | `github-token` | no | `''` | Token to post the plan as a PR comment. Empty skips the comment. |
@@ -136,8 +143,8 @@ file is uploaded as an artifact for the apply action to consume in the same run.
 | `env` | yes | — | Target environment for the Terraform run. |
 | `target` | no | `app` | Terraform target directory under `deploy/`. |
 | `tf-version` | no | `1.x` | Terraform version. |
-| `wif-provider` | yes | — | WIF provider resource name. |
-| `wif-service-account` | yes | — | Service account impersonated via WIF. |
+| `wif-provider` | no | `''` | GCP WIF provider resource name. Empty skips GCP auth. |
+| `wif-service-account` | no | `''` | Service account impersonated via WIF. Required when `wif-provider` is set. |
 | `aws-role-arn` | no | `''` | IAM role to assume via OIDC. Empty skips AWS auth. |
 | `aws-region` | no | `''` | Region for the assumed role. |
 | `plan-artifact-name` | no | `terraform-plan` | Plan artifact to download. Must match `infra-plan`. |

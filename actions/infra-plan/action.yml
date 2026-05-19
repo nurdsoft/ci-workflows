@@ -3,7 +3,8 @@ description: >-
   Run Terraform format, validate and plan for a deploy target. On a pull
   request the plan is posted as a sticky PR comment; on a push the plan file is
   uploaded as an artifact for a later apply. Authenticates to Google Cloud
-  (Workload Identity Federation) and, optionally, AWS (OIDC).
+  and/or AWS via keyless OIDC; the caller passes whichever auth applies and
+  the unused auth step is skipped.
 
 inputs:
   env:
@@ -18,11 +19,13 @@ inputs:
     required: false
     default: "1.x"
   wif-provider:
-    description: Workload Identity Federation provider resource name.
-    required: true
+    description: Google Cloud Workload Identity Federation provider resource name. Leave empty to skip GCP authentication.
+    required: false
+    default: ""
   wif-service-account:
-    description: Service account email impersonated via Workload Identity Federation.
-    required: true
+    description: Service account email impersonated via Workload Identity Federation. Required when wif-provider is set.
+    required: false
+    default: ""
   aws-role-arn:
     description: IAM role ARN to assume via OIDC. Leave empty to skip AWS authentication.
     required: false
@@ -51,12 +54,15 @@ runs:
         terraform_wrapper: true
 
     - name: Authenticate to Google Cloud
+      if: inputs.wif-provider != ''
       uses: google-github-actions/auth@v3
       with:
         workload_identity_provider: ${{ inputs.wif-provider }}
         service_account: ${{ inputs.wif-service-account }}
 
-    - uses: google-github-actions/setup-gcloud@v3
+    - name: Setup gcloud
+      if: inputs.wif-provider != ''
+      uses: google-github-actions/setup-gcloud@v3
 
     - name: Authenticate to AWS
       if: inputs.aws-role-arn != ''
