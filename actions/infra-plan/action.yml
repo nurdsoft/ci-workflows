@@ -1,0 +1,160 @@
+name: Infrastructure Plan
+description: >-
+  Run Terraform format, validate and plan for a deploy target. On a pull
+  request the plan is posted as a sticky PR comment; on a push the plan file is
+  uploaded as an artifact for a later apply. Authenticates to Google Cloud
+  (Workload Identity Federation) and, optionally, AWS (OIDC).
+
+inputs:
+  env:
+    description: Target environment for the Terraform run.
+    required: true
+  target:
+    description: Terraform target directory under `deploy/` (e.g. app, setup).
+    required: false
+    default: app
+  tf-version:
+    description: Terraform version to install.
+    required: false
+    default: "1.x"
+  wif-provider:
+    description: Workload Identity Federation provider resource name.
+    required: true
+  wif-service-account:
+    description: Service account email impersonated via Workload Identity Federation.
+    required: true
+  aws-role-arn:
+    description: IAM role ARN to assume via OIDC. Leave empty to skip AWS authentication.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region for the assumed role. Required only when aws-role-arn is set.
+    required: false
+    default: ""
+  github-token:
+    description: Token used to post the plan as a PR comment. Leave empty to skip the comment.
+    required: false
+    default: ""
+  plan-artifact-name:
+    description: Name of the uploaded plan artifact (must match the apply action).
+    required: false
+    default: terraform-plan
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v6
+
+    - uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.tf-version }}
+        terraform_wrapper: true
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: ${{ inputs.wif-provider }}
+        service_account: ${{ inputs.wif-service-account }}
+
+    - uses: google-github-actions/setup-gcloud@v3
+
+    - name: Authenticate to AWS
+      if: inputs.aws-role-arn != ''
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Init
+      shell: bash
+      run: make tf-init ENV=${{ inputs.env }} TARGET=${{ inputs.target }}
+
+    - name: Format check
+      id: fmt
+      shell: bash
+      run: make tf-fmt ENV=${{ inputs.env }} TARGET=${{ inputs.target }}
+      continue-on-error: true
+
+    - name: Validate
+      id: validate
+      shell: bash
+      run: make tf-validate ENV=${{ inputs.env }} TARGET=${{ inputs.target }}
+
+    - name: Plan
+      id: plan
+      shell: bash
+      run: |
+        set -o pipefail
+        make tf-plan ENV=${{ inputs.env }} TARGET=${{ inputs.target }} 2>&1 | tee /tmp/plan.txt
+      continue-on-error: true
+
+    - name: Post plan as PR comment
+      if: github.event_name == 'pull_request' && inputs.github-token != ''
+      uses: actions/github-script@v9
+      env:
+        TF_TARGET: ${{ inputs.target }}
+        FMT_OUTCOME: ${{ steps.fmt.outcome }}
+        VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        PLAN_OUTCOME: ${{ steps.plan.outcome }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const target = process.env.TF_TARGET;
+          const plan = fs.readFileSync('/tmp/plan.txt', 'utf8');
+          const MAX = 60000;
+          const planTrimmed = plan.length > MAX
+            ? plan.slice(0, MAX) + `\n\n... (output truncated, ${plan.length - MAX} chars dropped)`
+            : plan;
+          const marker = `<!-- tf-plan-${target} -->`;
+          const body = [
+            marker,
+            `## Terraform Plan — \`deploy/${target}\``,
+            '',
+            '| Step | Status |',
+            '|------|--------|',
+            `| Format | \`${process.env.FMT_OUTCOME}\` |`,
+            `| Validate | \`${process.env.VALIDATE_OUTCOME}\` |`,
+            `| Plan | \`${process.env.PLAN_OUTCOME}\` |`,
+            '',
+            '<details><summary>Show Plan Output</summary>',
+            '',
+            '```hcl',
+            planTrimmed,
+            '```',
+            '',
+            '</details>',
+          ].join('\n');
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner, repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          const existing = comments.find(
+            c => c.user.type === 'Bot' && c.body.includes(marker)
+          );
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              comment_id: existing.id, body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, body,
+            });
+          }
+
+    # The plan file is consumed by the apply action in the same run, so the
+    # apply ships exactly the plan computed here. Uploaded on push only.
+    - name: Upload plan artifact
+      if: github.event_name == 'push' && steps.plan.outcome == 'success'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.plan-artifact-name }}
+        path: deploy/${{ inputs.target }}/plan.tfplan
+        retention-days: 1
+
+    - name: Fail if plan failed
+      if: steps.plan.outcome == 'failure'
+      shell: bash
+      run: exit 1

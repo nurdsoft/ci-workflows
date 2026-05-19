@@ -1,0 +1,63 @@
+name: Build
+description: >-
+  Install dependencies, lint, type-check and build the project, then upload
+  the build output as an artifact. Lint and type-check are informational and do
+  not fail the build.
+
+inputs:
+  env:
+    description: Target environment for the build.
+    required: true
+  node-version:
+    description: Node.js version used for the build.
+    required: false
+    default: "20"
+  app-version:
+    description: Version string injected into the build as NEXT_PUBLIC_APP_VERSION.
+    required: false
+    default: ""
+  artifact-name:
+    description: Name of the uploaded build-output artifact.
+    required: false
+    default: build-output
+  artifact-retention-days:
+    description: Retention period, in days, for the build-output artifact.
+    required: false
+    default: "7"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v6
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - name: Install
+      shell: bash
+      run: make install
+
+    - name: Lint
+      shell: bash
+      run: make lint
+      continue-on-error: true
+
+    - name: Type-check
+      shell: bash
+      run: make typecheck
+      continue-on-error: true
+
+    - name: Build
+      shell: bash
+      env:
+        NEXT_PUBLIC_APP_VERSION: ${{ inputs.app-version }}
+      run: make build ENV=${{ inputs.env }}
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: out
+        retention-days: ${{ inputs.artifact-retention-days }}

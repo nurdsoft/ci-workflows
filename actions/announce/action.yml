@@ -1,0 +1,44 @@
+name: Announce Deployment
+description: >-
+  Post a deployment result to a Slack incoming webhook. Best-effort: if no
+  webhook URL is provided the action does nothing and succeeds, so a missing
+  webhook never fails the pipeline.
+
+inputs:
+  result:
+    description: Deployment result, e.g. the `result` of the deploy job (`success` / `failure`).
+    required: true
+  webhook-url:
+    description: Slack incoming webhook URL. If empty, the action is a no-op.
+    required: false
+    default: ""
+  label:
+    description: Short label for the message, e.g. the app or component name.
+    required: false
+    default: Deployment
+  version:
+    description: Version string shown in the message.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Check webhook
+      id: hook
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook-url }}
+      run: '[ -n "$WEBHOOK" ] && echo "set=true" >> "$GITHUB_OUTPUT" || echo "set=false" >> "$GITHUB_OUTPUT"'
+
+    - name: Post to Slack
+      if: steps.hook.outputs.set == 'true'
+      uses: slackapi/slack-github-action@v3.0.3
+      with:
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "text": "${{ inputs.result == 'success' && ':white_check_mark:' || ':x:' }} ${{ inputs.label }}: ${{ inputs.result == 'success' && 'succeeded' || 'failed' }}  |  version `${{ inputs.version || 'n/a' }}`  |  <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
