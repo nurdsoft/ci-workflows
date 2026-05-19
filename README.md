@@ -132,6 +132,7 @@ The caller passes whichever cloud auth applies; the unused auth step is skipped 
 | `aws-region` | no | `''` | Region for the assumed role. |
 | `github-token` | no | `''` | Token to post the plan as a PR comment. Empty skips the comment. |
 | `plan-artifact-name` | no | `terraform-plan` | Name of the uploaded plan artifact. |
+| `plan-extra-paths` | no | `''` | Extra paths (one per line) to ship alongside `plan.tfplan` — e.g. a Lambda module's `builds/` directory. |
 
 On a pull request the plan is posted as a sticky PR comment. On a push the plan
 file is uploaded as an artifact for the apply action to consume in the same run.

@@ -42,6 +42,10 @@ inputs:
     description: Name of the uploaded plan artifact (must match the apply action).
     required: false
     default: terraform-plan
+  plan-extra-paths:
+    description: Additional paths to include in the plan artifact (one per line). Use this when the Terraform plan produces intermediate files outside `plan.tfplan` that the apply needs (e.g. a Lambda module's `builds/` directory).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -157,7 +161,10 @@ runs:
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.plan-artifact-name }}
-        path: deploy/${{ inputs.target }}/plan.tfplan
+        path: |
+          deploy/${{ inputs.target }}/plan.tfplan
+          ${{ inputs.plan-extra-paths }}
+        if-no-files-found: warn
         retention-days: 1
 
     - name: Fail if plan failed
