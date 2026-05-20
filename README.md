@@ -26,8 +26,6 @@ stays generic and reusable.
 | `actions/infra-apply`     | Composite action | Apply a saved infrastructure plan |
 | `actions/announce`        | Composite action | Post a deployment result to Slack |
 
-> `actions/build` and `actions/deploy` are deprecated aliases of `actions/frontend-build` and `actions/frontend-deploy`. They still resolve under `@v1` while consumers migrate, and will be removed in a follow-up.
-
 ## `release.yml` — SemVer release pipeline
 
 A generic, environment-agnostic reusable workflow that tags a commit with
