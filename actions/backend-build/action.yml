@@ -101,5 +101,5 @@ runs:
         echo "" >> "$GITHUB_STEP_SUMMARY"
         echo "Tags:" >> "$GITHUB_STEP_SUMMARY"
         printf '%s\n' "$TAGS" | while IFS= read -r t; do
-          [ -n "$t" ] && echo "- \`$t\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$t" ]; then echo "- \`$t\`" >> "$GITHUB_STEP_SUMMARY"; fi
         done
