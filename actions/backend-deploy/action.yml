@@ -1,0 +1,120 @@
+name: Backend Deploy
+description: >-
+  Deploy a pre-built container image to a managed service runtime.
+  Authenticates to Google Cloud via keyless OIDC and, optionally, loads
+  runtime environment variables from a Secret Manager secret. Currently
+  targets Google Cloud Run; the inputs are generic enough to add other
+  runtimes behind the same action later.
+
+inputs:
+  image:
+    description: Full image URI to deploy, including tag (e.g. `registry/image:1.2.3`).
+    required: true
+  service-name:
+    description: Name of the target service (e.g. Cloud Run service name).
+    required: true
+  region:
+    description: Region the service runs in.
+    required: true
+  env-secret:
+    description: Full resource path of a Secret Manager secret to load as runtime env vars (e.g. `projects/<id>/secrets/<name>/versions/latest`). Leave empty to skip.
+    required: false
+    default: ""
+  vpc-connector:
+    description: VPC connector name to attach to the service. Leave empty to skip.
+    required: false
+    default: ""
+  extra-flags:
+    description: Additional flags to pass to the deploy (one per line).
+    required: false
+    default: ""
+  env-vars-update-strategy:
+    description: Strategy for updating environment variables (`merge` or `overwrite`).
+    required: false
+    default: overwrite
+  wif-provider:
+    description: Google Cloud Workload Identity Federation provider resource name.
+    required: false
+    default: ""
+  wif-service-account:
+    description: Service account email impersonated via WIF. Required when wif-provider is set.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: AWS IAM role ARN. Reserved for future runtime support.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region. Reserved for future runtime support.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Authenticate to Google Cloud
+      if: inputs.wif-provider != ''
+      uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: ${{ inputs.wif-provider }}
+        service_account: ${{ inputs.wif-service-account }}
+
+    - name: Setup gcloud
+      if: inputs.wif-provider != ''
+      uses: google-github-actions/setup-gcloud@v3
+
+    - name: Authenticate to AWS
+      if: inputs.aws-role-arn != ''
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Fetch runtime env vars from Secret Manager
+      id: env-secret
+      if: inputs.env-secret != ''
+      uses: google-github-actions/get-secretmanager-secrets@v2
+      with:
+        secrets: |
+          ENV_VARS:${{ inputs.env-secret }}
+
+    - name: Format env vars for the deploy
+      id: format-env
+      if: inputs.env-secret != ''
+      shell: bash
+      env:
+        SECRETS_JSON: ${{ steps.env-secret.outputs.ENV_VARS }}
+      run: |
+        if [ -z "$SECRETS_JSON" ] || [ "$SECRETS_JSON" = "null" ]; then
+          echo "::error::Failed to fetch env vars from secret"
+          exit 1
+        fi
+        printf '%s' "$SECRETS_JSON" | jq -r 'to_entries[] | "::add-mask::\(.value)"'
+        formatted=$(printf '%s' "$SECRETS_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' | paste -sd, -)
+        echo "vars=$formatted" >> "$GITHUB_OUTPUT"
+
+    - name: Deploy to Cloud Run
+      uses: google-github-actions/deploy-cloudrun@v2
+      with:
+        service: ${{ inputs.service-name }}
+        image: ${{ inputs.image }}
+        region: ${{ inputs.region }}
+        flags: |
+          ${{ inputs.vpc-connector != '' && format('--vpc-connector={0}', inputs.vpc-connector) || '' }}
+          ${{ inputs.extra-flags }}
+        env_vars: ${{ steps.format-env.outputs.vars }}
+        env_vars_update_strategy: ${{ inputs.env-vars-update-strategy }}
+
+    - name: Deploy summary
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        SERVICE: ${{ inputs.service-name }}
+        REGION: ${{ inputs.region }}
+      run: |
+        echo "### Service deployed" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "- Service: \`$SERVICE\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "- Region: \`$REGION\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "- Image: \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "- Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

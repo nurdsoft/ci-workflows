@@ -18,11 +18,15 @@ stays generic and reusable.
 | Path | Type | Purpose |
 | ---- | ---- | ------- |
 | `.github/workflows/release.yml` | Reusable workflow | Tag a SemVer release |
-| `actions/build`       | Composite action | Build the project and upload the output |
-| `actions/deploy`      | Composite action | Publish the build to a bucket and invalidate the CDN |
-| `actions/infra-plan`  | Composite action | Plan infrastructure changes |
-| `actions/infra-apply` | Composite action | Apply a saved infrastructure plan |
-| `actions/announce`    | Composite action | Post a deployment result to Slack |
+| `actions/frontend-build`  | Composite action | Build a frontend project and upload the output |
+| `actions/frontend-deploy` | Composite action | Publish the build to a bucket and invalidate the CDN |
+| `actions/backend-build`   | Composite action | Build a container image (and optionally push) |
+| `actions/backend-deploy`  | Composite action | Deploy a container image to a managed service runtime |
+| `actions/infra-plan`      | Composite action | Plan infrastructure changes |
+| `actions/infra-apply`     | Composite action | Apply a saved infrastructure plan |
+| `actions/announce`        | Composite action | Post a deployment result to Slack |
+
+> `actions/build` and `actions/deploy` are deprecated aliases of `actions/frontend-build` and `actions/frontend-deploy`. They still resolve under `@v1` while consumers migrate, and will be removed in a follow-up.
 
 ## `release.yml` — SemVer release pipeline
 
@@ -91,7 +95,7 @@ The composite actions are the steps of a release pipeline. Each plugs into one
 job of the caller's workflow, so the caller keeps a flat, readable run graph and
 owns the job DAG (`needs:` / `if:`), triggers and permissions.
 
-### `build`
+### `frontend-build`
 
 | Input | Required | Default | Purpose |
 | ----- | -------- | ------- | ------- |
@@ -103,7 +107,7 @@ owns the job DAG (`needs:` / `if:`), triggers and permissions.
 | `artifact-name` | no | `build-output` | Name of the uploaded artifact. |
 | `artifact-retention-days` | no | `7` | Artifact retention. |
 
-### `deploy`
+### `frontend-deploy`
 
 | Input | Required | Default | Purpose |
 | ----- | -------- | ------- | ------- |
@@ -118,6 +122,36 @@ owns the job DAG (`needs:` / `if:`), triggers and permissions.
 | `app-version` | no | `''` | Version shown in the run summary. |
 
 The caller passes whichever cloud auth applies; the unused auth step is skipped automatically.
+
+### `backend-build`
+
+| Input | Required | Default | Purpose |
+| ----- | -------- | ------- | ------- |
+| `tags` | yes | — | Image tags to apply (one per line; each must be a full `registry/image:tag` URI). |
+| `push` | no | `false` | Push the image after building. Set `false` for PR validation. |
+| `registry` | no | `''` | Container registry hostname for docker login. Required when `push` is true. |
+| `dockerfile` | no | `Dockerfile` | Path to the Dockerfile. |
+| `context` | no | `.` | Build context directory. |
+| `wif-provider` | no | `''` | GCP WIF provider resource name. Empty skips GCP auth. |
+| `wif-service-account` | no | `''` | Service account impersonated via WIF. Required when `wif-provider` is set. |
+| `aws-role-arn` | no | `''` | AWS IAM role to assume via OIDC. Empty skips AWS auth. |
+| `aws-region` | no | `''` | AWS region for the assumed role. |
+
+### `backend-deploy`
+
+| Input | Required | Default | Purpose |
+| ----- | -------- | ------- | ------- |
+| `image` | yes | — | Full image URI to deploy, including tag (e.g. `registry/image:1.2.3`). |
+| `service-name` | yes | — | Name of the target service. |
+| `region` | yes | — | Region the service runs in. |
+| `env-secret` | no | `''` | Full resource path of a Secret Manager secret to load as runtime env vars. Empty skips the fetch. |
+| `vpc-connector` | no | `''` | VPC connector name to attach to the service. Empty skips. |
+| `extra-flags` | no | `''` | Additional deploy flags (one per line). |
+| `env-vars-update-strategy` | no | `overwrite` | Strategy for updating env vars (`merge` or `overwrite`). |
+| `wif-provider` | no | `''` | GCP WIF provider resource name. |
+| `wif-service-account` | no | `''` | Service account impersonated via WIF. Required when `wif-provider` is set. |
+
+Currently targets Google Cloud Run. Other runtimes can be added behind the same action later.
 
 ### `infra-plan`
 
@@ -171,7 +205,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: nurdsoft/ci-workflows/actions/build@v1
+      - uses: nurdsoft/ci-workflows/actions/frontend-build@v1
         with:
           env: <env>
           app-version: ${{ needs.version.outputs.version }}

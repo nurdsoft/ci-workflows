@@ -1,0 +1,94 @@
+name: Deploy
+description: >-
+  Download a build-output artifact and publish it, then invalidate the CDN.
+  Authenticates to Google Cloud and/or AWS via keyless OIDC; the caller passes
+  whichever auth applies and the unused auth step is skipped.
+
+inputs:
+  env:
+    description: Target environment for the deploy.
+    required: true
+  wif-provider:
+    description: Google Cloud Workload Identity Federation provider resource name. Leave empty to skip GCP authentication.
+    required: false
+    default: ""
+  wif-service-account:
+    description: Service account email impersonated via Workload Identity Federation. Required when wif-provider is set.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: AWS IAM role ARN to assume via OIDC. Leave empty to skip AWS authentication.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region for the assumed role. Required when aws-role-arn is set.
+    required: false
+    default: ""
+  artifact-name:
+    description: Name of the build-output artifact to download.
+    required: false
+    default: build-output
+  build-output-path:
+    description: Local path the artifact is unpacked to.
+    required: false
+    default: out
+  app-url:
+    description: Public URL of the deployed app, shown in the run summary. Optional.
+    required: false
+    default: ""
+  app-version:
+    description: Version string shown in the run summary. Optional.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v6
+
+    - name: Download build artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.build-output-path }}
+
+    - name: Authenticate to Google Cloud
+      if: inputs.wif-provider != ''
+      uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: ${{ inputs.wif-provider }}
+        service_account: ${{ inputs.wif-service-account }}
+
+    - name: Setup gcloud
+      if: inputs.wif-provider != ''
+      uses: google-github-actions/setup-gcloud@v3
+
+    - name: Authenticate to AWS
+      if: inputs.aws-role-arn != ''
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Publish to bucket
+      shell: bash
+      run: make rsync ENV=${{ inputs.env }}
+
+    - name: Invalidate CDN
+      shell: bash
+      run: make cdn-invalidate ENV=${{ inputs.env }}
+
+    - name: Deploy summary
+      shell: bash
+      env:
+        APP_URL: ${{ inputs.app-url }}
+        APP_VERSION: ${{ inputs.app-version }}
+      run: |
+        if [ -n "$APP_URL" ]; then
+          echo "### Deployed to $APP_URL" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "- Version: \`${APP_VERSION:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "- Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
