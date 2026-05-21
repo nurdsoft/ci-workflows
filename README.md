@@ -203,11 +203,13 @@ Best-effort: a missing webhook never fails the pipeline.
 | `project-id` | yes | — | Google Cloud project ID containing the secret. |
 | `secret-name` | yes | — | Secret Manager secret name (the `latest` version is fetched). |
 
-The secret payload must be a JSON object of `{ "KEY": "value", ... }` pairs. Each
-key is exported to `$GITHUB_ENV` and each value is masked in logs. Exports
-survive subsequent steps and composite actions, including those that re-checkout
-the repo — so this action can run before `frontend-build` to inject build-time
-env vars that would otherwise be wiped by the build action's `git clean`.
+The secret payload must be a JSON object of `{ "KEY": "value", ... }` pairs.
+Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values may contain newlines (PEM
+keys, certs, etc.) and are written via a randomized heredoc delimiter. Each
+value is masked line-by-line in logs. Exports survive subsequent steps and
+composite actions, including those that re-checkout the repo — so this action
+can run before `frontend-build` to inject build-time env vars that would
+otherwise be wiped by the build action's `git clean`.
 
 ### Usage
 

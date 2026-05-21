@@ -40,5 +40,34 @@ runs:
       env:
         SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
       run: |
-        echo "$SECRET_JSON" | jq -r 'to_entries | .[] | "::add-mask::\(.value)"'
-        echo "$SECRET_JSON" | jq -r 'to_entries | map("\(.key)=\(.value)") | .[]' >> "$GITHUB_ENV"
+        set -euo pipefail
+
+        if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
+          echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
+          exit 1
+        fi
+
+        # Mask each line of every value so multi-line secrets (PEM keys, certs)
+        # are fully redacted in logs, not just their first line.
+        while IFS= read -r line; do
+          [ -n "$line" ] && echo "::add-mask::$line"
+        done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
+
+        # Write to $GITHUB_ENV using a heredoc delimiter so values containing
+        # newlines are preserved. Delimiter is randomized per run and verified
+        # not to collide with any value before writing.
+        delim="GHENV_EOF_$(openssl rand -hex 16)"
+        if jq -e --arg d "$delim" 'any(.[]; tostring | contains($d))' <<<"$SECRET_JSON" >/dev/null; then
+          echo "ERROR: secret value collided with generated heredoc delimiter; retry the job" >&2
+          exit 1
+        fi
+
+        # Validate keys against the identifier shape GitHub Actions accepts.
+        jq -r --arg d "$delim" '
+          to_entries[] |
+          if (.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) then
+            "\(.key)<<\($d)\n\(.value)\n\($d)"
+          else
+            "invalid env var key: \(.key)" | halt_error(1)
+          end
+        ' <<<"$SECRET_JSON" >> "$GITHUB_ENV"
