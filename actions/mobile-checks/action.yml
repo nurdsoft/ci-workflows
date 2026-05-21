@@ -1,0 +1,44 @@
+name: Mobile Checks
+description: >-
+  Install dependencies and run lint, type-check and tests for an Expo / React
+  Native project. Lint, type-check and tests are informational and do not fail
+  the job. Scripts are run only if present, so the same action works for a
+  fully wired app and a bare skeleton.
+
+inputs:
+  node-version:
+    description: Node.js version used for the checks.
+    required: false
+    default: "20"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v6
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - name: Install
+      shell: bash
+      run: npm ci
+
+    - name: Type-check
+      shell: bash
+      run: npx --no-install tsc --noEmit
+      continue-on-error: true
+
+    - name: Lint
+      shell: bash
+      # Only runs if the project defines a `lint` script.
+      run: npm run lint --if-present
+      continue-on-error: true
+
+    - name: Test
+      shell: bash
+      # Only runs if the project defines a `test` script. Force non-interactive
+      # CI mode so a watch-mode default (e.g. `jest --watchAll`) can't hang.
+      run: npm run test --if-present -- --ci --watchAll=false --passWithNoTests
+      continue-on-error: true

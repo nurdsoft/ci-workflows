@@ -1,0 +1,115 @@
+name: Mobile Deploy
+description: >-
+  Deploy an Expo / React Native app. Two modes: `submit` sends the latest EAS
+  build to the app stores via `eas submit`; `update` publishes an over-the-air
+  JS/asset update to an EAS Update channel via `eas update`. Sets up the EAS CLI
+  authenticated with an Expo token.
+
+inputs:
+  expo-token:
+    description: Expo access token (EXPO_TOKEN) with access to the project.
+    required: true
+  mode:
+    description: "`submit` (store submission) or `update` (over-the-air update)."
+    required: true
+  profile:
+    description: EAS profile for `submit` mode (from eas.json), e.g. `production`.
+    required: false
+    default: production
+  platform:
+    description: Target platform for `submit` mode — `android`, `ios`, or `all`.
+    required: false
+    default: all
+  branch:
+    description: EAS Update branch for `update` mode (e.g. `production`, `preview`).
+    required: false
+    default: ""
+  message:
+    description: Update message for `update` mode. Defaults to the commit SHA.
+    required: false
+    default: ""
+  node-version:
+    description: Node.js version used for the deploy.
+    required: false
+    default: "20"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v6
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - name: Install
+      shell: bash
+      run: npm ci
+
+    - uses: expo/expo-github-action@v8
+      with:
+        eas-version: latest
+        token: ${{ inputs.expo-token }}
+
+    - name: Validate mode
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        if [ "$MODE" != "submit" ] && [ "$MODE" != "update" ]; then
+          echo "::error::mode must be 'submit' or 'update' (got '$MODE')"
+          exit 1
+        fi
+
+    - name: EAS submit
+      if: inputs.mode == 'submit'
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        eas submit \
+          --profile "$PROFILE" \
+          --platform "$PLATFORM" \
+          --latest \
+          --non-interactive
+
+    - name: EAS update (OTA)
+      if: inputs.mode == 'update'
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        MESSAGE: ${{ inputs.message }}
+      run: |
+        if [ -z "$BRANCH" ]; then
+          echo "::error::update mode requires a 'branch' input"
+          exit 1
+        fi
+        msg="$MESSAGE"
+        if [ -z "$msg" ]; then msg="${{ github.sha }}"; fi
+        eas update \
+          --branch "$BRANCH" \
+          --message "$msg" \
+          --non-interactive
+
+    - name: Deploy summary
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        PROFILE: ${{ inputs.profile }}
+        PLATFORM: ${{ inputs.platform }}
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        {
+          echo "### Mobile deploy"
+          echo ""
+          echo "- Mode: \`$MODE\`"
+          if [ "$MODE" = "submit" ]; then
+            echo "- Profile: \`$PROFILE\`"
+            echo "- Platform: \`$PLATFORM\`"
+          else
+            echo "- Update branch: \`$BRANCH\`"
+          fi
+          echo "- Commit: \`${{ github.sha }}\`"
+        } >> "$GITHUB_STEP_SUMMARY"
