@@ -24,6 +24,9 @@ stays generic and reusable.
 | `actions/backend-deploy`  | Composite action | Deploy a container image to a managed service runtime |
 | `actions/infra-plan`      | Composite action | Plan infrastructure changes |
 | `actions/infra-apply`     | Composite action | Apply a saved infrastructure plan |
+| `actions/mobile-checks`   | Composite action | Install deps and run lint / type-check / tests for an Expo project |
+| `actions/mobile-build`    | Composite action | Build an Expo / React Native app with EAS Build |
+| `actions/mobile-deploy`   | Composite action | Submit an EAS build to the stores or publish an over-the-air update |
 | `actions/announce`        | Composite action | Post a deployment result to Slack |
 
 ## `release.yml` — SemVer release pipeline
@@ -181,6 +184,40 @@ file is uploaded as an artifact for the apply action to consume in the same run.
 | `aws-role-arn` | no | `''` | IAM role to assume via OIDC. Empty skips AWS auth. |
 | `aws-region` | no | `''` | Region for the assumed role. |
 | `plan-artifact-name` | no | `terraform-plan` | Plan artifact to download. Must match `infra-plan`. |
+
+### `mobile-checks`
+
+| Input | Required | Default | Purpose |
+| ----- | -------- | ------- | ------- |
+| `node-version` | no | `20` | Node.js version. |
+
+Runs `npm ci`, then `tsc --noEmit`, the `lint` script and the `test` script. Lint and test run only if the project defines those scripts (`npm run … --if-present`), and all three checks are informational — they never fail the job. Tests are forced into non-interactive CI mode so a watch-mode default can't hang.
+
+### `mobile-build`
+
+| Input | Required | Default | Purpose |
+| ----- | -------- | ------- | ------- |
+| `expo-token` | yes | — | Expo access token with access to the project. |
+| `profile` | yes | — | EAS build profile from `eas.json` (e.g. `production`, `preview`). |
+| `platform` | no | `all` | Target platform: `android`, `ios`, or `all`. |
+| `node-version` | no | `20` | Node.js version. |
+| `wait` | no | `true` | Wait for the build to finish. Set `false` to queue and return immediately. |
+
+Runs `eas build` for the given profile and platform. Waits by default so a later `mobile-deploy` (submit) step can pick up the finished build.
+
+### `mobile-deploy`
+
+| Input | Required | Default | Purpose |
+| ----- | -------- | ------- | ------- |
+| `expo-token` | yes | — | Expo access token with access to the project. |
+| `mode` | yes | — | `submit` (store submission) or `update` (over-the-air update). |
+| `profile` | no | `production` | EAS profile for `submit` mode. |
+| `platform` | no | `all` | Platform for `submit` mode: `android`, `ios`, or `all`. |
+| `branch` | no | `''` | EAS Update branch for `update` mode (required in that mode). |
+| `message` | no | `''` | Update message for `update` mode. Defaults to the commit SHA. |
+| `node-version` | no | `20` | Node.js version. |
+
+In `submit` mode runs `eas submit --latest` to send the most recent build to the stores. In `update` mode runs `eas update` to publish an over-the-air JS/asset update to the given channel.
 
 ### `announce`
 
