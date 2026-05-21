@@ -25,6 +25,7 @@ stays generic and reusable.
 | `actions/infra-plan`      | Composite action | Plan infrastructure changes |
 | `actions/infra-apply`     | Composite action | Apply a saved infrastructure plan |
 | `actions/announce`        | Composite action | Post a deployment result to Slack |
+| `actions/gcp-secret-env`  | Composite action | Export a GCP Secret Manager JSON secret to `$GITHUB_ENV` |
 
 ## `release.yml` — SemVer release pipeline
 
@@ -192,6 +193,21 @@ file is uploaded as an artifact for the apply action to consume in the same run.
 | `version` | no | `''` | Version shown in the message. |
 
 Best-effort: a missing webhook never fails the pipeline.
+
+### `gcp-secret-env`
+
+| Input | Required | Default | Purpose |
+| ----- | -------- | ------- | ------- |
+| `wif-provider` | yes | — | GCP WIF provider resource name. |
+| `wif-service-account` | yes | — | Service account impersonated via WIF. |
+| `project-id` | yes | — | Google Cloud project ID containing the secret. |
+| `secret-name` | yes | — | Secret Manager secret name (the `latest` version is fetched). |
+
+The secret payload must be a JSON object of `{ "KEY": "value", ... }` pairs. Each
+key is exported to `$GITHUB_ENV` and each value is masked in logs. Exports
+survive subsequent steps and composite actions, including those that re-checkout
+the repo — so this action can run before `frontend-build` to inject build-time
+env vars that would otherwise be wiped by the build action's `git clean`.
 
 ### Usage
 

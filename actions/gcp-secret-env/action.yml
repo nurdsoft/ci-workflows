@@ -1,0 +1,44 @@
+name: GCP Secret Manager to env
+description: >-
+  Authenticate to Google Cloud via Workload Identity Federation and export
+  key-value pairs from a Secret Manager JSON secret to the workflow
+  environment ($GITHUB_ENV). Each value is masked. Exports survive subsequent
+  steps and composite actions, including those that re-checkout the repo.
+
+inputs:
+  wif-provider:
+    description: Google Cloud Workload Identity Federation provider resource name.
+    required: true
+  wif-service-account:
+    description: Service account email impersonated via Workload Identity Federation.
+    required: true
+  project-id:
+    description: Google Cloud project ID containing the secret.
+    required: true
+  secret-name:
+    description: Secret Manager secret name (the `latest` version is fetched).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: ${{ inputs.wif-provider }}
+        service_account: ${{ inputs.wif-service-account }}
+
+    - name: Fetch secret from Secret Manager
+      id: secret
+      uses: google-github-actions/get-secretmanager-secrets@v2
+      with:
+        secrets: |
+          ENV_VARS:projects/${{ inputs.project-id }}/secrets/${{ inputs.secret-name }}/versions/latest
+
+    - name: Mask and export to GITHUB_ENV
+      shell: bash
+      env:
+        SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
+      run: |
+        echo "$SECRET_JSON" | jq -r 'to_entries | .[] | "::add-mask::\(.value)"'
+        echo "$SECRET_JSON" | jq -r 'to_entries | map("\(.key)=\(.value)") | .[]' >> "$GITHUB_ENV"
