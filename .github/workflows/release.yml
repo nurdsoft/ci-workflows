@@ -65,7 +65,8 @@ jobs:
 
       - name: Expose version
         id: version
-        run: '[ -f .version ] && echo "version=$(cat .version)" >> "$GITHUB_OUTPUT" || true'
+        run: |
+          if [ -f .version ]; then echo "version=$(cat .version)" >> "$GITHUB_OUTPUT"; fi
 
       - name: Commit changelog
         if: inputs.changelog
