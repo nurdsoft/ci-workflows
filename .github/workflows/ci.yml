@@ -1,0 +1,67 @@
+name: CI
+
+# Lints this repository's own workflows and composite actions on every PR and
+# push to main. actionlint covers the workflow files (and runs shellcheck on
+# their run: blocks); a follow-up step runs shellcheck over the composite
+# actions' run: blocks, which actionlint does not inspect.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+
+      - name: Run actionlint (workflows)
+        run: ./actionlint -color
+
+      - name: Shellcheck composite action run blocks (informational)
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import glob, re, subprocess, tempfile, os, sys
+          try:
+              import yaml
+          except ImportError:
+              subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=True)
+              import yaml
+          # GitHub expressions aren't valid shell; replace them with a token so
+          # shellcheck parses the script. Ignore SC2154 (env-injected vars) and
+          # SC2086 (intentional unquoted runner words like `npm run`).
+          EXPR = re.compile(r"\$\{\{.*?\}\}")
+          flagged = 0
+          for path in sorted(glob.glob("actions/*/action.yml")):
+              with open(path) as fh:
+                  doc = yaml.safe_load(fh)
+              steps = (doc.get("runs") or {}).get("steps") or []
+              for i, st in enumerate(steps):
+                  run = st.get("run")
+                  if not run:
+                      continue
+                  script = "#!/bin/bash\n" + EXPR.sub("GHA_EXPR", run)
+                  with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as tf:
+                      tf.write(script)
+                      fn = tf.name
+                  res = subprocess.run(
+                      ["shellcheck", "-S", "warning", "-e", "SC2154,SC2086", fn],
+                      capture_output=True, text=True,
+                  )
+                  if res.returncode != 0:
+                      flagged += 1
+                      print(f"::group::{path} - step {i} ({st.get('name', '')})")
+                      print(res.stdout)
+                      print("::endgroup::")
+                  os.unlink(fn)
+          print(f"shellcheck flagged {flagged} composite step(s) (informational)")
+          PY
