@@ -1,0 +1,113 @@
+name: Apply
+description: >-
+  Apply the saved plan produced by the plan action in the same run, so what is
+  applied is exactly what was planned. Installs the IaC tool, authenticates,
+  downloads the plan artifact, and applies via the runner contract (or override).
+
+inputs:
+  run-init:
+    description: Explicit init command. Empty falls back to "<runner> tf-init".
+    required: false
+    default: ""
+  run-apply:
+    description: Explicit apply command. Empty falls back to "<runner> tf-apply".
+    required: false
+    default: ""
+  runner:
+    description: Task runner for the default contract targets.
+    required: false
+    default: make
+  env:
+    description: Target environment.
+    required: true
+  target:
+    description: Target directory under deploy/.
+    required: false
+    default: app
+  tool:
+    description: "IaC tool to install: terraform | none."
+    required: false
+    default: terraform
+  tf-version:
+    description: Terraform version (when tool is terraform).
+    required: false
+    default: "1.x"
+  gcp-wif-provider:
+    description: GCP WIF provider. Empty skips GCP auth.
+    required: false
+    default: ""
+  gcp-service-account:
+    description: Service account impersonated via WIF.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: AWS role to assume via OIDC. Empty skips AWS auth.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region for the assumed role.
+    required: false
+    default: ""
+  plan-artifact-name:
+    description: Plan artifact to download (must match plan).
+    required: false
+    default: terraform-plan
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Setup Terraform
+      if: inputs.tool == 'terraform'
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+      with:
+        terraform_version: ${{ inputs.tf-version }}
+        terraform_wrapper: true
+
+    - name: Authenticate
+      if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
+      uses: nurdsoft/ci-workflows/actions/auth@v2
+      with:
+        gcp-wif-provider: ${{ inputs.gcp-wif-provider }}
+        gcp-service-account: ${{ inputs.gcp-service-account }}
+        aws-role-arn: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Download plan artifact
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: ${{ inputs.plan-artifact-name }}
+        path: deploy/${{ inputs.target }}
+
+    - name: Init
+      shell: bash
+      env:
+        RUN_INIT: ${{ inputs.run-init }}
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        if [ -n "$RUN_INIT" ]; then bash -c "$RUN_INIT"; else $RUNNER tf-init ENV="$ENV" TARGET="$TARGET"; fi
+
+    - name: Apply
+      shell: bash
+      env:
+        RUN_APPLY: ${{ inputs.run-apply }}
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        if [ -n "$RUN_APPLY" ]; then bash -c "$RUN_APPLY"; else $RUNNER tf-apply ENV="$ENV" TARGET="$TARGET"; fi
+
+    - name: Summary
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        SHA: ${{ github.sha }}
+      run: |
+        {
+          echo "### Infrastructure applied — \`deploy/$TARGET\`"
+          echo ""
+          echo "- Commit: \`$SHA\`"
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,109 @@
+name: Deploy
+description: >-
+  Ship the build. Runs `run` if given, otherwise `<runner> deploy` (default make)
+  — no Makefile required when `run` is supplied. Optionally downloads a build
+  artifact, prepares a Node/Expo toolchain, and authenticates to a cloud.
+
+inputs:
+  run:
+    description: Explicit deploy command. Empty falls back to "<runner> deploy".
+    required: false
+    default: ""
+  runner:
+    description: Task runner for the default contract target.
+    required: false
+    default: make
+  env:
+    description: Target environment, passed to the deploy as ENV.
+    required: false
+    default: ""
+  node-version:
+    description: If set, install the Node/Expo toolchain before deploying.
+    required: false
+    default: ""
+  expo-token:
+    description: Expo token, forwarded to setup for EAS submit/update.
+    required: false
+    default: ""
+  download-artifact:
+    description: Download a build artifact before deploying.
+    required: false
+    default: "false"
+  artifact-name:
+    description: Artifact to download.
+    required: false
+    default: build-output
+  build-output-path:
+    description: Local path the artifact is unpacked to.
+    required: false
+    default: out
+  gcp-wif-provider:
+    description: GCP WIF provider. Empty skips GCP auth.
+    required: false
+    default: ""
+  gcp-service-account:
+    description: Service account impersonated via WIF.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: AWS role to assume via OIDC. Empty skips AWS auth.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region for the assumed role.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Download artifact
+      if: inputs.download-artifact == 'true'
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.build-output-path }}
+
+    - name: Setup toolchain
+      if: inputs.node-version != ''
+      uses: nurdsoft/ci-workflows/actions/setup@v2
+      with:
+        node-version: ${{ inputs.node-version }}
+        expo-token: ${{ inputs.expo-token }}
+
+    - name: Authenticate
+      if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
+      uses: nurdsoft/ci-workflows/actions/auth@v2
+      with:
+        gcp-wif-provider: ${{ inputs.gcp-wif-provider }}
+        gcp-service-account: ${{ inputs.gcp-service-account }}
+        aws-role-arn: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Deploy
+      shell: bash
+      env:
+        USER_RUN: ${{ inputs.run }}
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+      run: |
+        if [ -n "$USER_RUN" ]; then
+          bash -c "$USER_RUN"
+        else
+          $RUNNER deploy ENV="$ENV"
+        fi
+
+    - name: Summary
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+        SHA: ${{ github.sha }}
+      run: |
+        {
+          echo "### Deploy"
+          echo ""
+          echo "- Env: \`${ENV:-n/a}\`"
+          echo "- Commit: \`$SHA\`"
+        } >> "$GITHUB_STEP_SUMMARY"

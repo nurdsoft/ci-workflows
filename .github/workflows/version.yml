@@ -1,27 +1,34 @@
-name: Release
+name: Version
 
-# Reusable release pipeline. Generic and environment-agnostic: it runs
-# go-semantic-release with the options it is given. It has no knowledge of any
-# branch or environment. The calling repo decides, per branch, whether a run is
-# a stable release or an rc prerelease.
+# Reusable workflow that cuts a SemVer release with go-semantic-release. It owns
+# the rc-vs-stable decision by detecting the repository's default branch, so
+# callers cannot mis-trigger an rc on the default branch. It runs in its own job
+# with `contents: write` (needed to push tags / the changelog), isolating that
+# privilege from the rest of the pipeline.
+
 on:
   workflow_call:
     inputs:
-      maintained-version:
-        description: 'rc prerelease line passed to go-semantic-release (e.g. 1-rc). Empty produces a stable release.'
+      rc-line:
+        description: 'rc prerelease line used ONLY on non-default branches (e.g. 1-rc). Empty = stable on all branches.'
         type: string
         required: false
         default: ''
-      changelog:
-        description: 'Generate CHANGELOG.md and commit it back to the branch.'
+      changelog-on-default:
+        description: 'Generate + commit CHANGELOG.md on the default branch.'
         type: boolean
         required: false
-        default: false
+        default: true
       semrel-version:
         description: 'go-semantic-release binary version.'
         type: string
         required: false
         default: v2.31.0
+      semrel-sha256:
+        description: 'Expected SHA-256 of the semantic-release linux_amd64 binary for semrel-version. Empty skips verification (logs a warning).'
+        type: string
+        required: false
+        default: ''
     outputs:
       version:
         description: 'The version produced, or empty if no release was cut.'
@@ -37,28 +44,37 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout (full history and tags)
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
 
       - name: Install go-semantic-release
         env:
           SEMREL_VERSION: ${{ inputs.semrel-version }}
+          SEMREL_SHA256: ${{ inputs.semrel-sha256 }}
         run: |
-          curl -sSL "https://github.com/go-semantic-release/semantic-release/releases/download/${SEMREL_VERSION}/semantic-release_${SEMREL_VERSION}_linux_amd64" -o ./semantic-release
+          url="https://github.com/go-semantic-release/semantic-release/releases/download/${SEMREL_VERSION}/semantic-release_${SEMREL_VERSION}_linux_amd64"
+          curl -sSL "$url" -o ./semantic-release
+          if [ -n "$SEMREL_SHA256" ]; then
+            echo "${SEMREL_SHA256}  ./semantic-release" | sha256sum -c -
+          else
+            echo "::warning::semrel-sha256 not provided; skipping binary checksum verification"
+          fi
           chmod +x ./semantic-release
 
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RC_LINE: ${{ inputs.maintained-version }}
-          WITH_CHANGELOG: ${{ inputs.changelog }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CURRENT_REF: ${{ github.ref_name }}
+          RC_LINE: ${{ inputs.rc-line }}
+          WITH_CHANGELOG: ${{ inputs.changelog-on-default }}
         run: |
           set -- --token "$GH_TOKEN" --version-file --allow-no-changes
-          if [ -n "$RC_LINE" ]; then
+          if [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ -n "$RC_LINE" ]; then
             set -- "$@" --prerelease --maintained-version "$RC_LINE"
           fi
-          if [ "$WITH_CHANGELOG" = "true" ]; then
+          if [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG" = "true" ]; then
             set -- "$@" --changelog CHANGELOG.md --prepend-changelog
           fi
           ./semantic-release "$@"
@@ -69,7 +85,7 @@ jobs:
           if [ -f .version ]; then echo "version=$(cat .version)" >> "$GITHUB_OUTPUT"; fi
 
       - name: Commit changelog
-        if: inputs.changelog
+        if: inputs.changelog-on-default
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
