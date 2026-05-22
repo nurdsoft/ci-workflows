@@ -1,106 +1,138 @@
-name: Infrastructure Plan
+name: Plan
 description: >-
-  Run Terraform format, validate and plan for a deploy target. On a pull
-  request the plan is posted as a sticky PR comment; on a push the plan file is
-  uploaded as an artifact for a later apply. Authenticates to Google Cloud
-  and/or AWS via keyless OIDC; the caller passes whichever auth applies and
-  the unused auth step is skipped.
+  Preview an infrastructure change. Installs the IaC tool, authenticates, runs
+  the plan via the runner contract (or `run-*` overrides), posts the plan as a
+  sticky PR comment, and on push uploads the saved plan for a later apply.
 
 inputs:
-  env:
-    description: Target environment for the Terraform run.
-    required: true
-  target:
-    description: Terraform target directory under `deploy/` (e.g. app, setup).
-    required: false
-    default: app
-  tf-version:
-    description: Terraform version to install.
-    required: false
-    default: "1.x"
-  wif-provider:
-    description: Google Cloud Workload Identity Federation provider resource name. Leave empty to skip GCP authentication.
+  run-init:
+    description: Explicit init command. Empty falls back to "<runner> tf-init".
     required: false
     default: ""
-  wif-service-account:
-    description: Service account email impersonated via Workload Identity Federation. Required when wif-provider is set.
+  run-plan:
+    description: Explicit plan command. Empty falls back to "<runner> tf-plan".
+    required: false
+    default: ""
+  runner:
+    description: Task runner for the default contract targets.
+    required: false
+    default: make
+  env:
+    description: Target environment.
+    required: true
+  target:
+    description: Target directory under deploy/ (e.g. app, setup).
+    required: false
+    default: app
+  tool:
+    description: "IaC tool to install: terraform | none."
+    required: false
+    default: terraform
+  tf-version:
+    description: Terraform version (when tool is terraform).
+    required: false
+    default: "1.x"
+  gcp-wif-provider:
+    description: GCP WIF provider. Empty skips GCP auth.
+    required: false
+    default: ""
+  gcp-service-account:
+    description: Service account impersonated via WIF.
     required: false
     default: ""
   aws-role-arn:
-    description: IAM role ARN to assume via OIDC. Leave empty to skip AWS authentication.
+    description: AWS role to assume via OIDC. Empty skips AWS auth.
     required: false
     default: ""
   aws-region:
-    description: AWS region for the assumed role. Required only when aws-role-arn is set.
+    description: AWS region for the assumed role.
     required: false
     default: ""
   github-token:
-    description: Token used to post the plan as a PR comment. Leave empty to skip the comment.
+    description: Token to post the plan as a PR comment. Empty skips the comment.
     required: false
     default: ""
   plan-artifact-name:
-    description: Name of the uploaded plan artifact (must match the apply action).
+    description: Name of the uploaded plan artifact (must match apply).
     required: false
     default: terraform-plan
   plan-extra-paths:
-    description: Additional paths to include in the plan artifact (one per line). Use this when the Terraform plan produces intermediate files outside `plan.tfplan` that the apply needs (e.g. a Lambda module's `builds/` directory).
+    description: Extra paths (one per line) to include in the plan artifact.
     required: false
     default: ""
 
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-    - uses: hashicorp/setup-terraform@v4
+    - name: Setup Terraform
+      if: inputs.tool == 'terraform'
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
       with:
         terraform_version: ${{ inputs.tf-version }}
         terraform_wrapper: true
 
-    - name: Authenticate to Google Cloud
-      if: inputs.wif-provider != ''
-      uses: google-github-actions/auth@v3
+    - name: Authenticate
+      if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
+      uses: nurdsoft/ci-workflows/actions/auth@v2
       with:
-        workload_identity_provider: ${{ inputs.wif-provider }}
-        service_account: ${{ inputs.wif-service-account }}
-
-    - name: Setup gcloud
-      if: inputs.wif-provider != ''
-      uses: google-github-actions/setup-gcloud@v3
-
-    - name: Authenticate to AWS
-      if: inputs.aws-role-arn != ''
-      uses: aws-actions/configure-aws-credentials@v6
-      with:
-        role-to-assume: ${{ inputs.aws-role-arn }}
+        gcp-wif-provider: ${{ inputs.gcp-wif-provider }}
+        gcp-service-account: ${{ inputs.gcp-service-account }}
+        aws-role-arn: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}
 
     - name: Init
       shell: bash
-      run: make tf-init ENV=${{ inputs.env }} TARGET=${{ inputs.target }}
+      env:
+        RUN_INIT: ${{ inputs.run-init }}
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        if [ -n "$RUN_INIT" ]; then bash -c "$RUN_INIT"; else $RUNNER tf-init ENV="$ENV" TARGET="$TARGET"; fi
 
     - name: Format check
       id: fmt
+      if: inputs.tool == 'terraform'
       shell: bash
-      run: make tf-fmt ENV=${{ inputs.env }} TARGET=${{ inputs.target }}
+      env:
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        TARGET: ${{ inputs.target }}
+      run: $RUNNER tf-fmt ENV="$ENV" TARGET="$TARGET"
       continue-on-error: true
 
     - name: Validate
       id: validate
+      if: inputs.tool == 'terraform'
       shell: bash
-      run: make tf-validate ENV=${{ inputs.env }} TARGET=${{ inputs.target }}
+      env:
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        TARGET: ${{ inputs.target }}
+      run: $RUNNER tf-validate ENV="$ENV" TARGET="$TARGET"
 
     - name: Plan
       id: plan
       shell: bash
+      env:
+        RUN_PLAN: ${{ inputs.run-plan }}
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        TARGET: ${{ inputs.target }}
       run: |
         set -o pipefail
-        make tf-plan ENV=${{ inputs.env }} TARGET=${{ inputs.target }} 2>&1 | tee /tmp/plan.txt
+        if [ -n "$RUN_PLAN" ]; then
+          bash -c "$RUN_PLAN" 2>&1 | tee /tmp/plan.txt
+        else
+          $RUNNER tf-plan ENV="$ENV" TARGET="$TARGET" 2>&1 | tee /tmp/plan.txt
+        fi
       continue-on-error: true
 
     - name: Post plan as PR comment
       if: github.event_name == 'pull_request' && inputs.github-token != ''
-      uses: actions/github-script@v9
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
       env:
         TF_TARGET: ${{ inputs.target }}
         FMT_OUTCOME: ${{ steps.fmt.outcome }}
@@ -154,11 +186,9 @@ runs:
             });
           }
 
-    # The plan file is consumed by the apply action in the same run, so the
-    # apply ships exactly the plan computed here. Uploaded on push only.
     - name: Upload plan artifact
       if: github.event_name == 'push' && steps.plan.outcome == 'success'
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: ${{ inputs.plan-artifact-name }}
         path: |

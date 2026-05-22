@@ -1,39 +1,35 @@
-name: Announce Deployment
+name: Notify
 description: >-
-  Post a deployment result to a Slack incoming webhook. Best-effort: if no
-  webhook URL is provided the action does nothing and succeeds, so a missing
-  webhook never fails the pipeline.
+  Post a pipeline result to a chat channel. Best-effort: with no webhook the
+  action is a no-op and succeeds, so a missing webhook never fails the pipeline.
 
 inputs:
   result:
-    description: Deployment result, e.g. the `result` of the deploy job (`success` / `failure`).
+    description: Result (success / failure), e.g. a deploy job's result.
     required: true
   webhook-url:
-    description: Slack incoming webhook URL. If empty, the action is a no-op.
+    description: Incoming webhook URL. Empty makes the action a no-op.
     required: false
     default: ""
   label:
-    description: Short label for the message, e.g. the app or component name.
+    description: Short label for the message (app / component name).
     required: false
     default: Deployment
   version:
     description: Version string shown in the message.
     required: false
     default: ""
+  channel:
+    description: "Chat channel: slack (only slack implemented today)."
+    required: false
+    default: slack
 
 runs:
   using: composite
   steps:
-    - name: Check webhook
-      id: hook
-      shell: bash
-      env:
-        WEBHOOK: ${{ inputs.webhook-url }}
-      run: '[ -n "$WEBHOOK" ] && echo "set=true" >> "$GITHUB_OUTPUT" || echo "set=false" >> "$GITHUB_OUTPUT"'
-
     - name: Post to Slack
-      if: steps.hook.outputs.set == 'true'
-      uses: slackapi/slack-github-action@v3.0.3
+      if: inputs.webhook-url != '' && inputs.channel == 'slack'
+      uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c  # v3.0.3
       with:
         webhook-type: incoming-webhook
         payload: |

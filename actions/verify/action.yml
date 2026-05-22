@@ -1,0 +1,53 @@
+name: Verify
+description: >-
+  Run quality gates — type-check, lint and tests. All informational
+  (continue-on-error) so they surface problems without blocking; tighten on the
+  caller side once a project is clean. Commands are overridable for non-npm stacks.
+
+inputs:
+  node-version:
+    description: Node.js version.
+    required: false
+    default: "20"
+  typecheck:
+    description: Type-check command.
+    required: false
+    default: "npx --no-install tsc --noEmit"
+  lint:
+    description: Lint command.
+    required: false
+    default: "npm run lint --if-present"
+  test:
+    description: Test command.
+    required: false
+    default: "npm run test --if-present -- --ci --watchAll=false --passWithNoTests"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - uses: nurdsoft/ci-workflows/actions/setup@v2
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Type-check
+      shell: bash
+      env:
+        CMD: ${{ inputs.typecheck }}
+      run: bash -c "$CMD"
+      continue-on-error: true
+
+    - name: Lint
+      shell: bash
+      env:
+        CMD: ${{ inputs.lint }}
+      run: bash -c "$CMD"
+      continue-on-error: true
+
+    - name: Test
+      shell: bash
+      env:
+        CMD: ${{ inputs.test }}
+      run: bash -c "$CMD"
+      continue-on-error: true

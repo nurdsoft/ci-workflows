@@ -1,0 +1,128 @@
+name: Build
+description: >-
+  Produce a deployable artifact. Runs `run` if given, otherwise `<runner> build`
+  (default make) — so no Makefile is required when `run` is supplied. Optionally
+  prepares a Node/Expo toolchain and authenticates to a cloud (for registry
+  pushes performed by the build command). Can upload the output as an artifact.
+
+inputs:
+  run:
+    description: Explicit build command. Empty falls back to "<runner> build".
+    required: false
+    default: ""
+  runner:
+    description: Task runner for the default contract target.
+    required: false
+    default: make
+  env:
+    description: Target environment, passed to the build as ENV.
+    required: false
+    default: ""
+  node-version:
+    description: If set, install the Node/Expo toolchain before building.
+    required: false
+    default: ""
+  expo-token:
+    description: Expo token, forwarded to setup for EAS builds.
+    required: false
+    default: ""
+  app-version:
+    description: Version string injected into the build as version-env-var.
+    required: false
+    default: ""
+  version-env-var:
+    description: Name of the env var that receives app-version.
+    required: false
+    default: ""
+  gcp-wif-provider:
+    description: GCP WIF provider. Empty skips GCP auth.
+    required: false
+    default: ""
+  gcp-service-account:
+    description: Service account impersonated via WIF.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: AWS role to assume via OIDC. Empty skips AWS auth.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region for the assumed role.
+    required: false
+    default: ""
+  output:
+    description: "Artifact handling: artifact | none."
+    required: false
+    default: none
+  artifact-name:
+    description: Name of the uploaded artifact (when output is artifact).
+    required: false
+    default: build-output
+  build-output-path:
+    description: Directory uploaded as the artifact.
+    required: false
+    default: out
+  artifact-retention-days:
+    description: Artifact retention.
+    required: false
+    default: "7"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Setup toolchain
+      if: inputs.node-version != ''
+      uses: nurdsoft/ci-workflows/actions/setup@v2
+      with:
+        node-version: ${{ inputs.node-version }}
+        expo-token: ${{ inputs.expo-token }}
+
+    - name: Authenticate
+      if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
+      uses: nurdsoft/ci-workflows/actions/auth@v2
+      with:
+        gcp-wif-provider: ${{ inputs.gcp-wif-provider }}
+        gcp-service-account: ${{ inputs.gcp-service-account }}
+        aws-role-arn: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Build
+      shell: bash
+      env:
+        USER_RUN: ${{ inputs.run }}
+        RUNNER: ${{ inputs.runner }}
+        ENV: ${{ inputs.env }}
+        APP_VERSION: ${{ inputs.app-version }}
+        APP_VERSION_VAR: ${{ inputs.version-env-var }}
+      run: |
+        if [ -n "$APP_VERSION_VAR" ]; then export "$APP_VERSION_VAR=$APP_VERSION"; fi
+        if [ -n "$USER_RUN" ]; then
+          bash -c "$USER_RUN"
+        else
+          $RUNNER build ENV="$ENV"
+        fi
+
+    - name: Upload artifact
+      if: inputs.output == 'artifact'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.build-output-path }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    - name: Summary
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+        OUTPUT: ${{ inputs.output }}
+        SHA: ${{ github.sha }}
+      run: |
+        {
+          echo "### Build"
+          echo ""
+          echo "- Env: \`${ENV:-n/a}\`"
+          echo "- Output: \`$OUTPUT\`"
+          echo "- Commit: \`$SHA\`"
+        } >> "$GITHUB_STEP_SUMMARY"
