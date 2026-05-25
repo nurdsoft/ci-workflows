@@ -5,7 +5,13 @@ description: >-
   prepares a Node/Expo toolchain and authenticates to a cloud (for registry
   pushes performed by the build command). Can upload the output as an artifact.
 
+  Docker path: when `image-name` is set the action switches to a Docker build+push
+  flow — authenticates via WIF, optionally fetches build-time env vars from Secret
+  Manager into .env.production, then builds and pushes the image directly to
+  Artifact Registry. The static-build steps are skipped entirely in this mode.
+
 inputs:
+  # ── Static build inputs ────────────────────────────────────────────────────
   run:
     description: Explicit build command. Empty falls back to "<runner> build".
     required: false
@@ -34,22 +40,6 @@ inputs:
     description: Name of the env var that receives app-version.
     required: false
     default: ""
-  gcp-wif-provider:
-    description: GCP WIF provider. Empty skips GCP auth.
-    required: false
-    default: ""
-  gcp-service-account:
-    description: Service account impersonated via WIF.
-    required: false
-    default: ""
-  aws-role-arn:
-    description: AWS role to assume via OIDC. Empty skips AWS auth.
-    required: false
-    default: ""
-  aws-region:
-    description: AWS region for the assumed role.
-    required: false
-    default: ""
   output:
     description: "Artifact handling: artifact | none."
     required: false
@@ -67,18 +57,76 @@ inputs:
     required: false
     default: "7"
 
+  # ── Shared cloud auth inputs ───────────────────────────────────────────────
+  gcp-wif-provider:
+    description: GCP WIF provider. Empty skips GCP auth.
+    required: false
+    default: ""
+  gcp-service-account:
+    description: Service account impersonated via WIF.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: AWS role to assume via OIDC. Empty skips AWS auth.
+    required: false
+    default: ""
+  aws-region:
+    description: AWS region for the assumed role.
+    required: false
+    default: ""
+
+  # ── Docker build inputs (set image-name to activate) ──────────────────────
+  image-name:
+    description: >-
+      Docker image name within the Artifact Registry repository. When set,
+      activates the Docker build+push path and skips the static build steps.
+    required: false
+    default: ""
+  image-tag:
+    description: Primary image tag. Defaults to the commit SHA when empty.
+    required: false
+    default: ""
+  gcp-project-id:
+    description: GCP project ID. Required when image-name is set.
+    required: false
+    default: ""
+  gcp-region:
+    description: GCP region (e.g. us-central1). Required when image-name is set.
+    required: false
+    default: ""
+  gcp-repository:
+    description: Artifact Registry repository name. Required when image-name is set.
+    required: false
+    default: ""
+  gcp-secret-name:
+    description: >-
+      Secret Manager secret holding build-time env vars as a JSON object.
+      Written to .env.production before the Docker build. Empty skips the fetch.
+    required: false
+    default: ""
+  context:
+    description: Docker build context path.
+    required: false
+    default: "."
+  dockerfile:
+    description: Path to the Dockerfile.
+    required: false
+    default: "Dockerfile"
+
 runs:
   using: composite
   steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
+    # ── Static path ───────────────────────────────────────────────────────────
     - name: Setup toolchain
-      if: inputs.node-version != ''
+      if: inputs.node-version != '' && inputs.image-name == ''
       uses: nurdsoft/ci-workflows/actions/setup@v2
       with:
         node-version: ${{ inputs.node-version }}
         expo-token: ${{ inputs.expo-token }}
 
+    # ── Shared: cloud auth (both paths) ───────────────────────────────────────
     - name: Authenticate
       if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
       uses: nurdsoft/ci-workflows/actions/auth@v2
@@ -88,7 +136,9 @@ runs:
         aws-role-arn: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}
 
+    # ── Static path ───────────────────────────────────────────────────────────
     - name: Build
+      if: inputs.image-name == ''
       shell: bash
       env:
         USER_RUN: ${{ inputs.run }}
@@ -105,16 +155,70 @@ runs:
         fi
 
     - name: Upload artifact
-      if: inputs.output == 'artifact'
+      if: inputs.output == 'artifact' && inputs.image-name == ''
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ inputs.build-output-path }}
         retention-days: ${{ inputs.artifact-retention-days }}
 
+    # ── Docker path ───────────────────────────────────────────────────────────
+    - name: Configure Docker for Artifact Registry
+      if: inputs.image-name != ''
+      shell: bash
+      env:
+        REGION: ${{ inputs.gcp-region }}
+      run: gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+
+    - name: Fetch build env vars from Secret Manager
+      id: secret
+      if: inputs.image-name != '' && inputs.gcp-secret-name != ''
+      uses: google-github-actions/get-secretmanager-secrets@v2
+      with:
+        secrets: |
+          ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
+
+    - name: Mask and write .env.production
+      if: inputs.image-name != '' && inputs.gcp-secret-name != ''
+      shell: bash
+      env:
+        SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
+      run: |
+        set -euo pipefail
+
+        if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
+          echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
+          exit 1
+        fi
+
+        while IFS= read -r line; do
+          [ -n "$line" ] && echo "::add-mask::$line"
+        done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
+
+        jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON" > .env.production
+
+    - name: Setup Docker Buildx
+      if: inputs.image-name != ''
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Docker image
+      if: inputs.image-name != ''
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        push: true
+        tags: |
+          ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
+          ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:latest
+
+    # ── Summary (both paths) ──────────────────────────────────────────────────
     - name: Summary
       shell: bash
       env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        IMAGE: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}
+        TAG: ${{ inputs.image-tag || github.sha }}
         ENV: ${{ inputs.env }}
         OUTPUT: ${{ inputs.output }}
         SHA: ${{ github.sha }}
@@ -122,7 +226,11 @@ runs:
         {
           echo "### Build"
           echo ""
-          echo "- Env: \`${ENV:-n/a}\`"
-          echo "- Output: \`$OUTPUT\`"
+          if [ -n "$IMAGE_NAME" ]; then
+            echo "- Image: \`${IMAGE}:${TAG}\`"
+          else
+            echo "- Env: \`${ENV:-n/a}\`"
+            echo "- Output: \`$OUTPUT\`"
+          fi
           echo "- Commit: \`$SHA\`"
         } >> "$GITHUB_STEP_SUMMARY"

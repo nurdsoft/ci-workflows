@@ -4,7 +4,13 @@ description: >-
   — no Makefile required when `run` is supplied. Optionally downloads a build
   artifact, prepares a Node/Expo toolchain, and authenticates to a cloud.
 
+  Cloud Run path: when `cloudrun-service` is set the action switches to a Cloud Run
+  deploy flow — authenticates via WIF, optionally fetches runtime env vars from
+  Secret Manager and injects them as Cloud Run environment variables. The standard
+  deploy steps are skipped entirely in this mode.
+
 inputs:
+  # ── Static deploy inputs ───────────────────────────────────────────────────
   run:
     description: Explicit deploy command. Empty falls back to "<runner> deploy".
     required: false
@@ -37,6 +43,8 @@ inputs:
     description: Local path the artifact is unpacked to.
     required: false
     default: out
+
+  # ── Shared cloud auth inputs ───────────────────────────────────────────────
   gcp-wif-provider:
     description: GCP WIF provider. Empty skips GCP auth.
     required: false
@@ -54,25 +62,67 @@ inputs:
     required: false
     default: ""
 
+  # ── Cloud Run deploy inputs (set cloudrun-service to activate) ────────────
+  cloudrun-service:
+    description: >-
+      Cloud Run service name. When set, activates the Cloud Run deploy path
+      and skips the standard deploy steps.
+    required: false
+    default: ""
+  image-name:
+    description: Docker image name within the Artifact Registry repository. Required when cloudrun-service is set.
+    required: false
+    default: ""
+  image-tag:
+    description: Image tag to deploy. Defaults to the commit SHA when empty.
+    required: false
+    default: ""
+  gcp-project-id:
+    description: GCP project ID. Required when cloudrun-service is set.
+    required: false
+    default: ""
+  gcp-region:
+    description: GCP region (e.g. us-central1). Required when cloudrun-service is set.
+    required: false
+    default: ""
+  gcp-repository:
+    description: Artifact Registry repository name. Required when cloudrun-service is set.
+    required: false
+    default: ""
+  gcp-secret-name:
+    description: >-
+      Secret Manager secret holding runtime env vars as a JSON object.
+      Injected as Cloud Run environment variables. Empty skips the fetch.
+    required: false
+    default: ""
+  cloudrun-flags:
+    description: >-
+      Extra flags forwarded verbatim to the Cloud Run deploy command
+      (e.g. "--allow-unauthenticated --ingress=internal-and-cloud-load-balancing").
+    required: false
+    default: ""
+
 runs:
   using: composite
   steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
+    # ── Static path ───────────────────────────────────────────────────────────
     - name: Download artifact
-      if: inputs.download-artifact == 'true'
+      if: inputs.download-artifact == 'true' && inputs.cloudrun-service == ''
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ inputs.build-output-path }}
 
     - name: Setup toolchain
-      if: inputs.node-version != ''
+      if: inputs.node-version != '' && inputs.cloudrun-service == ''
       uses: nurdsoft/ci-workflows/actions/setup@v2
       with:
         node-version: ${{ inputs.node-version }}
         expo-token: ${{ inputs.expo-token }}
 
+    # ── Shared: cloud auth (both paths) ───────────────────────────────────────
     - name: Authenticate
       if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
       uses: nurdsoft/ci-workflows/actions/auth@v2
@@ -82,7 +132,9 @@ runs:
         aws-role-arn: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}
 
+    # ── Static path ───────────────────────────────────────────────────────────
     - name: Deploy
+      if: inputs.cloudrun-service == ''
       shell: bash
       env:
         USER_RUN: ${{ inputs.run }}
@@ -95,15 +147,67 @@ runs:
           $RUNNER deploy ENV="$ENV"
         fi
 
+    # ── Cloud Run path ────────────────────────────────────────────────────────
+    - name: Fetch runtime env vars from Secret Manager
+      id: secret
+      if: inputs.cloudrun-service != '' && inputs.gcp-secret-name != ''
+      uses: google-github-actions/get-secretmanager-secrets@v2
+      with:
+        secrets: |
+          ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
+
+    - name: Format env vars for Cloud Run
+      id: env_vars
+      if: inputs.cloudrun-service != '' && inputs.gcp-secret-name != ''
+      shell: bash
+      env:
+        SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
+        PROJECT_ID: ${{ inputs.gcp-project-id }}
+      run: |
+        set -euo pipefail
+
+        if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
+          echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
+          exit 1
+        fi
+
+        while IFS= read -r line; do
+          [ -n "$line" ] && echo "::add-mask::$line"
+        done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
+
+        formatted=$(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON" | paste -sd, -)
+        echo "value=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},${formatted}" >> "$GITHUB_OUTPUT"
+
+    - name: Deploy to Cloud Run
+      if: inputs.cloudrun-service != ''
+      uses: google-github-actions/deploy-cloudrun@v2
+      with:
+        service: ${{ inputs.cloudrun-service }}
+        image: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
+        region: ${{ inputs.gcp-region }}
+        flags: ${{ inputs.cloudrun-flags }}
+        env_vars: ${{ steps.env_vars.outputs.value }}
+        env_vars_update_strategy: overwrite
+
+    # ── Summary (both paths) ──────────────────────────────────────────────────
     - name: Summary
       shell: bash
       env:
+        CLOUDRUN_SERVICE: ${{ inputs.cloudrun-service }}
+        REGION: ${{ inputs.gcp-region }}
+        IMAGE: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}
+        TAG: ${{ inputs.image-tag || github.sha }}
         ENV: ${{ inputs.env }}
         SHA: ${{ github.sha }}
       run: |
         {
           echo "### Deploy"
           echo ""
-          echo "- Env: \`${ENV:-n/a}\`"
+          if [ -n "$CLOUDRUN_SERVICE" ]; then
+            echo "- Service: \`${CLOUDRUN_SERVICE}\` (${REGION})"
+            echo "- Image: \`${IMAGE}:${TAG}\`"
+          else
+            echo "- Env: \`${ENV:-n/a}\`"
+          fi
           echo "- Commit: \`$SHA\`"
         } >> "$GITHUB_STEP_SUMMARY"
