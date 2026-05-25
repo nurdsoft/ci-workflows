@@ -1,0 +1,114 @@
+name: Cloud Run Deploy
+description: >-
+  Deploy a Docker image from Artifact Registry to a Cloud Run service.
+  Authenticates via WIF, optionally fetches runtime env vars from Secret
+  Manager and injects them as Cloud Run environment variables using the
+  overwrite strategy. Always prepends GOOGLE_CLOUD_PROJECT so application
+  code can resolve the project without a separate lookup.
+
+inputs:
+  gcp-wif-provider:
+    description: GCP Workload Identity Federation provider resource name.
+    required: true
+  gcp-service-account:
+    description: Service account impersonated via WIF.
+    required: true
+  gcp-project-id:
+    description: GCP project ID — used for Secret Manager path, registry URL, and GOOGLE_CLOUD_PROJECT.
+    required: true
+  gcp-region:
+    description: GCP region (e.g. us-central1) — the region the Cloud Run service is deployed to.
+    required: true
+  gcp-repository:
+    description: Artifact Registry repository name.
+    required: true
+  image-name:
+    description: Image name within the repository.
+    required: true
+  image-tag:
+    description: Image tag to deploy. Defaults to the triggering commit SHA when empty.
+    required: false
+    default: ""
+  service:
+    description: Cloud Run service name.
+    required: true
+  gcp-secret-name:
+    description: >-
+      Secret Manager secret whose latest version holds runtime env vars as a
+      JSON object of {"KEY": "VALUE"} pairs. Injected as Cloud Run env vars.
+      Empty skips the fetch and deploys with no env var changes.
+    required: false
+    default: ""
+  flags:
+    description: >-
+      Extra flags forwarded verbatim to the `gcloud run deploy` command
+      (e.g. "--allow-unauthenticated --ingress=internal-and-cloud-load-balancing").
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - uses: nurdsoft/ci-workflows/actions/auth@v2
+      with:
+        gcp-wif-provider: ${{ inputs.gcp-wif-provider }}
+        gcp-service-account: ${{ inputs.gcp-service-account }}
+
+    - name: Fetch runtime env vars from Secret Manager
+      id: secret
+      if: inputs.gcp-secret-name != ''
+      uses: google-github-actions/get-secretmanager-secrets@v2
+      with:
+        secrets: |
+          ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
+
+    - name: Format env vars for Cloud Run
+      id: env_vars
+      if: inputs.gcp-secret-name != ''
+      shell: bash
+      env:
+        SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
+        PROJECT_ID: ${{ inputs.gcp-project-id }}
+      run: |
+        set -euo pipefail
+
+        if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
+          echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
+          exit 1
+        fi
+
+        while IFS= read -r line; do
+          [ -n "$line" ] && echo "::add-mask::$line"
+        done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
+
+        formatted=$(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON" | paste -sd, -)
+        echo "value=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},${formatted}" >> "$GITHUB_OUTPUT"
+
+    - name: Deploy to Cloud Run
+      uses: google-github-actions/deploy-cloudrun@v2
+      with:
+        service: ${{ inputs.service }}
+        image: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
+        region: ${{ inputs.gcp-region }}
+        flags: ${{ inputs.flags }}
+        env_vars: ${{ steps.env_vars.outputs.value }}
+        env_vars_update_strategy: overwrite
+
+    - name: Summary
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        REGION: ${{ inputs.gcp-region }}
+        IMAGE: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}
+        TAG: ${{ inputs.image-tag || github.sha }}
+        SHA: ${{ github.sha }}
+      run: |
+        {
+          echo "### Cloud Run Deploy"
+          echo ""
+          echo "- Service: \`${SERVICE}\` (${REGION})"
+          echo "- Image: \`${IMAGE}:${TAG}\`"
+          echo "- Commit: \`${SHA}\`"
+        } >> "$GITHUB_STEP_SUMMARY"
