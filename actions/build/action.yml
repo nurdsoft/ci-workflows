@@ -1,17 +1,17 @@
 name: Build
 description: >-
   Produce a deployable artifact. Runs `run` if given, otherwise `<runner> build`
-  (default make) — so no Makefile is required when `run` is supplied. Optionally
+  (default make) -- so no Makefile is required when `run` is supplied. Optionally
   prepares a Node/Expo toolchain and authenticates to a cloud (for registry
   pushes performed by the build command). Can upload the output as an artifact.
 
   Docker path: when `image-name` is set the action switches to a Docker build+push
-  flow — authenticates via WIF, optionally fetches build-time env vars from Secret
+  flow -- authenticates via WIF, optionally fetches build-time env vars from Secret
   Manager into .env.production, then builds and pushes the image directly to
   Artifact Registry. The static-build steps are skipped entirely in this mode.
 
 inputs:
-  # ── Static build inputs ────────────────────────────────────────────────────
+  # -- Static build inputs ----------------------------------------------------
   run:
     description: Explicit build command. Empty falls back to "<runner> build".
     required: false
@@ -57,7 +57,7 @@ inputs:
     required: false
     default: "7"
 
-  # ── Shared cloud auth inputs ───────────────────────────────────────────────
+  # -- Shared cloud auth inputs -----------------------------------------------
   gcp-wif-provider:
     description: GCP WIF provider. Empty skips GCP auth.
     required: false
@@ -75,7 +75,7 @@ inputs:
     required: false
     default: ""
 
-  # ── Docker build inputs (set image-name to activate) ──────────────────────
+  # -- Docker build inputs (set image-name to activate) -----------------------
   image-name:
     description: >-
       Docker image name within the Artifact Registry repository. When set,
@@ -118,7 +118,7 @@ runs:
   steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-    # ── Static path ───────────────────────────────────────────────────────────
+    # -- Static path -----------------------------------------------------------
     - name: Setup toolchain
       if: inputs.node-version != '' && inputs.image-name == ''
       uses: nurdsoft/ci-workflows/actions/setup@v2
@@ -126,7 +126,7 @@ runs:
         node-version: ${{ inputs.node-version }}
         expo-token: ${{ inputs.expo-token }}
 
-    # ── Shared: cloud auth (both paths) ───────────────────────────────────────
+    # -- Shared: cloud auth (both paths) ---------------------------------------
     - name: Authenticate
       if: inputs.gcp-wif-provider != '' || inputs.aws-role-arn != ''
       uses: nurdsoft/ci-workflows/actions/auth@v2
@@ -136,7 +136,7 @@ runs:
         aws-role-arn: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}
 
-    # ── Static path ───────────────────────────────────────────────────────────
+    # -- Static path -----------------------------------------------------------
     - name: Build
       if: inputs.image-name == ''
       shell: bash
@@ -162,7 +162,7 @@ runs:
         path: ${{ inputs.build-output-path }}
         retention-days: ${{ inputs.artifact-retention-days }}
 
-    # ── Docker path ───────────────────────────────────────────────────────────
+    # -- Docker path -----------------------------------------------------------
     - name: Configure Docker for Artifact Registry
       if: inputs.image-name != ''
       shell: bash
@@ -212,7 +212,7 @@ runs:
           ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
           ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:latest
 
-    # ── Summary (both paths) ──────────────────────────────────────────────────
+    # -- Summary (both paths) --------------------------------------------------
     - name: Summary
       shell: bash
       env:
