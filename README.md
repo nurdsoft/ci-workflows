@@ -53,7 +53,7 @@ jobs:
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
     with:
-      rc-line: "rc"            # produces v1.x.y-rc.N on non-default branches; stable on default
+      rc-line: "1-rc"          # rc off non-default branches; stable on default
 
   build:
     needs: [version]
@@ -86,7 +86,7 @@ jobs:
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
     with:
-      rc-line: "rc"            # produces v1.x.y-rc.N on non-default branches
+      rc-line: "1-rc"          # rc off non-default branches; stable on default
 
   build:
     needs: [version]
@@ -167,19 +167,6 @@ and the `version.yml` reusable workflow.
 > **Docker / Cloud Run path**: when `image-name` (build) or `cloudrun-service` (deploy) is set,
 > the runner contract is bypassed entirely — the action handles auth, build, and deploy
 > against GCP Artifact Registry and Cloud Run directly. No Makefile targets required.
-
-## Versioning (prerelease behaviour)
-
-`version.yml` uses go-semantic-release with the following logic:
-
-| Branch | `rc-line` set? | Tag format produced |
-|--------|---------------|---------------------|
-| non-default (e.g. `dev`) | yes (`rc`) | `v{major}.{minor}.{patch}-rc.{n}` |
-| default (`main`) | n/a | `v{major}.{minor}.{patch}` (stable) |
-
-Internally, the workflow writes `{"maintainedVersion": "{major}-rc"}` to `.semrelrc` before
-running the binary — this is the correct config-file approach (the `--maintained-version` CLI
-flag expects a semver constraint, not a prerelease identifier).
 
 ## Versioning
 
