@@ -13,12 +13,12 @@ behind a runner contract you control (or pass inline via `run`).
 
 | Path | Type | Function |
 |------|------|----------|
-| `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release |
+| `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release (stable or RC prerelease) |
 | `actions/auth`   | Action | Obtain cloud credentials (OIDC) |
 | `actions/setup`  | Action | Install runtime + deps (+ EAS login) |
 | `actions/verify` | Action | Lint / type-check / test |
-| `actions/build`  | Action | Produce a deployable artifact |
-| `actions/deploy` | Action | Ship the artifact |
+| `actions/build`  | Action | Produce a deployable artifact — static or Docker image |
+| `actions/deploy` | Action | Ship the artifact — static site or Cloud Run service |
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
 | `actions/notify` | Action | Post the pipeline result |
@@ -39,7 +39,7 @@ behind a runner contract you control (or pass inline via `run`).
 Callers wire the actions into a job graph and supply their own values. Two
 illustrative shapes:
 
-**App pipeline — verify, release, build, deploy**
+**App pipeline — static site (verify, release, build, deploy)**
 
 ```yaml
 jobs:
@@ -53,7 +53,7 @@ jobs:
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
     with:
-      rc-line: "1-rc"          # rc off non-default branches; stable on default
+      rc-line: "rc"            # produces v1.x.y-rc.N on non-default branches; stable on default
 
   build:
     needs: [version]
@@ -74,6 +74,51 @@ jobs:
           download-artifact: "true"
           gcp-wif-provider: ${{ secrets.WIF_PROVIDER }}
           gcp-service-account: ${{ secrets.SERVICE_ACCOUNT }}
+```
+
+**App pipeline — Docker + Cloud Run (release, build, deploy)**
+
+Activated by passing `image-name` to `build` and `cloudrun-service` to `deploy`. The static-build and static-deploy steps are skipped automatically — existing callers are unaffected.
+
+```yaml
+jobs:
+  version:
+    uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
+    permissions: { contents: write }
+    with:
+      rc-line: "rc"            # produces v1.x.y-rc.N on non-default branches
+
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/build@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}   # fetched → .env.production at build time
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/deploy@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          cloudrun-service: ${{ secrets.CLOUDRUN_SERVICE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}   # fetched → injected as Cloud Run env vars
+          cloudrun-flags: "--allow-unauthenticated --ingress=internal-and-cloud-load-balancing"
 ```
 
 **Infrastructure pipeline — plan then apply the same plan**
@@ -118,6 +163,23 @@ tool (`just`, `task`, `npm run`), or implement the default `make` targets.
 
 Self-contained — no contract, no Makefile: `auth`, `setup`, `verify`, `notify`,
 and the `version.yml` reusable workflow.
+
+> **Docker / Cloud Run path**: when `image-name` (build) or `cloudrun-service` (deploy) is set,
+> the runner contract is bypassed entirely — the action handles auth, build, and deploy
+> against GCP Artifact Registry and Cloud Run directly. No Makefile targets required.
+
+## Versioning (prerelease behaviour)
+
+`version.yml` uses go-semantic-release with the following logic:
+
+| Branch | `rc-line` set? | Tag format produced |
+|--------|---------------|---------------------|
+| non-default (e.g. `dev`) | yes (`rc`) | `v{major}.{minor}.{patch}-rc.{n}` |
+| default (`main`) | n/a | `v{major}.{minor}.{patch}` (stable) |
+
+Internally, the workflow writes `{"maintainedVersion": "{major}-rc"}` to `.semrelrc` before
+running the binary — this is the correct config-file approach (the `--maintained-version` CLI
+flag expects a semver constraint, not a prerelease identifier).
 
 ## Versioning
 
