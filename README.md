@@ -121,6 +121,53 @@ jobs:
           cloudrun-flags: "--allow-unauthenticated --ingress=internal-and-cloud-load-balancing"
 ```
 
+**App pipeline — GHCR pull + retag + Cloud Run (pre-built image)**
+
+For services whose Docker image is built and published to GHCR by a separate process (e.g. a commerce platform). Activated by passing `ghcr-image` to `build` alongside `image-name`. The action pulls the pre-built image, re-tags it for GCP Artifact Registry (SHA + latest), and pushes it — no Dockerfile or build-time secrets required. Takes priority over the Docker build+push path.
+
+```yaml
+jobs:
+  version:
+    uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
+    permissions: { contents: write }
+    with:
+      rc-line: "1-rc"
+
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/build@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REGISTRY }}
+          image-name: ${{ vars.SERVICE_NAME }}
+          ghcr-image: ghcr.io/org/repo:latest   # source image; triggers pull+retag path
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/deploy@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REGISTRY }}
+          image-name: ${{ vars.SERVICE_NAME }}
+          cloudrun-service: ${{ vars.SERVICE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}
+          cloudrun-flags: >-
+            --vpc-connector="${{ secrets.GCP_VPC_CONNECTOR }}"
+            --ingress=internal-and-cloud-load-balancing
+```
+
 **Infrastructure pipeline — plan then apply the same plan**
 
 ```yaml
@@ -167,6 +214,10 @@ and the `version.yml` reusable workflow.
 > **Docker / Cloud Run path**: when `image-name` (build) or `cloudrun-service` (deploy) is set,
 > the runner contract is bypassed entirely — the action handles auth, build, and deploy
 > against GCP Artifact Registry and Cloud Run directly. No Makefile targets required.
+>
+> **GHCR pull + retag path**: when `ghcr-image` (build) is also set, the action pulls the
+> pre-built image from GHCR and re-tags it for Artifact Registry instead of building from
+> source. No Dockerfile or build-time secrets needed.
 
 ## Versioning
 

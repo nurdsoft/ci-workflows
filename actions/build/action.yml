@@ -10,6 +10,10 @@ description: >-
   Manager into .env.production, then builds and pushes the image directly to
   Artifact Registry. The static-build steps are skipped entirely in this mode.
 
+  Pull+retag path: when `ghcr-image` is set the action pulls a pre-built image from
+  GHCR, re-tags it for Artifact Registry (SHA + latest), and pushes it. No Dockerfile
+  or build-time secrets are needed. Takes priority over the Docker build path.
+
 inputs:
   # -- Static build inputs ----------------------------------------------------
   run:
@@ -76,6 +80,16 @@ inputs:
     default: ""
 
   # -- Docker build inputs (set image-name to activate) -----------------------
+  # Pull+retag path: set ghcr-image to pull a pre-built GHCR image instead of
+  # building from source. image-name, gcp-project-id, gcp-region, and
+  # gcp-repository are still required to identify the Artifact Registry target.
+  ghcr-image:
+    description: >-
+      Source image to pull from GHCR (e.g. ghcr.io/org/repo:latest). When set,
+      activates the pull+retag path: pulls the image, re-tags it for Artifact
+      Registry, and pushes it. Takes priority over the Docker build+push path.
+    required: false
+    default: ""
   image-name:
     description: >-
       Docker image name within the Artifact Registry repository. When set,
@@ -120,7 +134,7 @@ runs:
 
     # -- Static path -----------------------------------------------------------
     - name: Setup toolchain
-      if: inputs.node-version != '' && inputs.image-name == ''
+      if: inputs.node-version != '' && inputs.image-name == '' && inputs.ghcr-image == ''
       uses: nurdsoft/ci-workflows/actions/setup@v2
       with:
         node-version: ${{ inputs.node-version }}
@@ -138,7 +152,7 @@ runs:
 
     # -- Static path -----------------------------------------------------------
     - name: Build
-      if: inputs.image-name == ''
+      if: inputs.image-name == '' && inputs.ghcr-image == ''
       shell: bash
       env:
         USER_RUN: ${{ inputs.run }}
@@ -155,16 +169,16 @@ runs:
         fi
 
     - name: Upload artifact
-      if: inputs.output == 'artifact' && inputs.image-name == ''
+      if: inputs.output == 'artifact' && inputs.image-name == '' && inputs.ghcr-image == ''
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ inputs.build-output-path }}
         retention-days: ${{ inputs.artifact-retention-days }}
 
-    # -- Docker path -----------------------------------------------------------
+    # -- Docker build path -----------------------------------------------------
     - name: Configure Docker for Artifact Registry
-      if: inputs.image-name != ''
+      if: inputs.image-name != '' && inputs.ghcr-image == ''
       shell: bash
       env:
         REGION: ${{ inputs.gcp-region }}
@@ -172,14 +186,14 @@ runs:
 
     - name: Fetch build env vars from Secret Manager
       id: secret
-      if: inputs.image-name != '' && inputs.gcp-secret-name != ''
+      if: inputs.image-name != '' && inputs.gcp-secret-name != '' && inputs.ghcr-image == ''
       uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5  # v2.2.5
       with:
         secrets: |
           ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
 
     - name: Mask and write .env.production
-      if: inputs.image-name != '' && inputs.gcp-secret-name != ''
+      if: inputs.image-name != '' && inputs.gcp-secret-name != '' && inputs.ghcr-image == ''
       shell: bash
       env:
         SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
@@ -198,11 +212,11 @@ runs:
         jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON" > .env.production
 
     - name: Setup Docker Buildx
-      if: inputs.image-name != ''
+      if: inputs.image-name != '' && inputs.ghcr-image == ''
       uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
     - name: Build and push Docker image
-      if: inputs.image-name != ''
+      if: inputs.image-name != '' && inputs.ghcr-image == ''
       uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
       with:
         context: ${{ inputs.context }}
@@ -212,11 +226,35 @@ runs:
           ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
           ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:latest
 
+    # -- Pull+retag path -------------------------------------------------------
+    - name: Configure Docker for Artifact Registry
+      if: inputs.ghcr-image != ''
+      shell: bash
+      env:
+        REGION: ${{ inputs.gcp-region }}
+      run: gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+
+    - name: Pull, re-tag and push from GHCR
+      if: inputs.ghcr-image != ''
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.ghcr-image }}
+        TARGET: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}
+        TAG: ${{ inputs.image-tag || github.sha }}
+      run: |
+        set -euo pipefail
+        docker pull "${SOURCE}"
+        docker tag "${SOURCE}" "${TARGET}:${TAG}"
+        docker tag "${SOURCE}" "${TARGET}:latest"
+        docker push "${TARGET}:${TAG}"
+        docker push "${TARGET}:latest"
+
     # -- Summary (both paths) --------------------------------------------------
     - name: Summary
       shell: bash
       env:
         IMAGE_NAME: ${{ inputs.image-name }}
+        GHCR_IMAGE: ${{ inputs.ghcr-image }}
         IMAGE: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}
         TAG: ${{ inputs.image-tag || github.sha }}
         ENV: ${{ inputs.env }}
@@ -226,7 +264,10 @@ runs:
         {
           echo "### Build"
           echo ""
-          if [ -n "$IMAGE_NAME" ]; then
+          if [ -n "$GHCR_IMAGE" ]; then
+            echo "- Source: \`${GHCR_IMAGE}\`"
+            echo "- Image: \`${IMAGE}:${TAG}\`"
+          elif [ -n "$IMAGE_NAME" ]; then
             echo "- Image: \`${IMAGE}:${TAG}\`"
           else
             echo "- Env: \`${ENV:-n/a}\`"
