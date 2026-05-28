@@ -18,7 +18,7 @@ behind a runner contract you control (or pass inline via `run`).
 | `actions/setup`  | Action | Install runtime + deps (+ EAS login) |
 | `actions/verify` | Action | Lint / type-check / test |
 | `actions/build`  | Action | Produce a deployable artifact — static or Docker image |
-| `actions/deploy` | Action | Ship the artifact — static site or Cloud Run service |
+| `actions/deploy` | Action | Ship the artifact — static site, Cloud Run service, or Cloud Run job (+ optional Cloud Scheduler) |
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
 | `actions/notify` | Action | Post the pipeline result |
@@ -168,6 +168,56 @@ jobs:
             --ingress=internal-and-cloud-load-balancing
 ```
 
+**App pipeline — Docker + Cloud Run job with Cloud Scheduler**
+
+Activated by passing `cloudrun-job` to `deploy` instead of `cloudrun-service`. Optionally creates a Cloud Scheduler trigger (idempotent — skipped if already exists) when `scheduler-name` and `schedule-time` are set.
+
+```yaml
+jobs:
+  version:
+    uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
+    permissions: { contents: write }
+    with:
+      rc-line: "1-rc"
+
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/build@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}
+
+  deploy-job:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/deploy@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          cloudrun-job: ${{ secrets.CLOUDRUN_JOB_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}
+          cloudrun-flags: >-
+            --command="/app/server"
+            --args="worker"
+            --vpc-connector=${{ secrets.VPC_CONNECTOR }}
+          scheduler-name: my-job-scheduler-trigger   # omit to skip scheduler creation
+          schedule-time: "0 * * * *"                 # cron expression — hourly
+```
+
 **Infrastructure pipeline — plan then apply the same plan**
 
 ```yaml
@@ -211,9 +261,13 @@ tool (`just`, `task`, `npm run`), or implement the default `make` targets.
 Self-contained — no contract, no Makefile: `auth`, `setup`, `verify`, `notify`,
 and the `version.yml` reusable workflow.
 
-> **Docker / Cloud Run path**: when `image-name` (build) or `cloudrun-service` (deploy) is set,
+> **Docker / Cloud Run path**: when `image-name` (build) or `cloudrun-service` / `cloudrun-job` (deploy) is set,
 > the runner contract is bypassed entirely — the action handles auth, build, and deploy
 > against GCP Artifact Registry and Cloud Run directly. No Makefile targets required.
+>
+> **Cloud Run job path**: when `cloudrun-job` (deploy) is set instead of `cloudrun-service`, the action
+> deploys a Cloud Run job and optionally creates a Cloud Scheduler trigger. Pass `scheduler-name` and
+> `schedule-time` to enable scheduling; omit both to skip it.
 >
 > **GHCR pull + retag path**: when `ghcr-image` (build) is also set, the action pulls the
 > pre-built image from GHCR and re-tags it for Artifact Registry instead of building from
