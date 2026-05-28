@@ -43,11 +43,13 @@ inputs:
     required: false
     default: ""
   scheduler-name:
-    description: Cloud Scheduler trigger name (idempotent — skipped if already exists).
-    required: true
+    description: Cloud Scheduler trigger name (idempotent — skipped if already exists). Empty skips scheduler creation.
+    required: false
+    default: ""
   scheduler-schedule:
-    description: Cron schedule expression (e.g. "0 * * * *").
-    required: true
+    description: Cron schedule expression (e.g. "0 * * * *"). Required when scheduler-name is set.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -97,6 +99,7 @@ runs:
         env_vars_update_strategy: overwrite
 
     - name: Create Cloud Scheduler
+      if: inputs.scheduler-name != ''
       shell: bash
       env:
         SCHEDULER_NAME: ${{ inputs.scheduler-name }}
@@ -139,6 +142,6 @@ runs:
           echo ""
           echo "- Job: \`${JOB_NAME}\` (${REGION})"
           echo "- Image: \`${IMAGE}:${TAG}\`"
-          echo "- Scheduler: \`${SCHEDULER_NAME}\`"
+          [ -n "$SCHEDULER_NAME" ] && echo "- Scheduler: \`${SCHEDULER_NAME}\`"
           echo "- Commit: \`$SHA\`"
         } >> "$GITHUB_STEP_SUMMARY"
