@@ -1,0 +1,144 @@
+name: Deploy Cloud Run Job
+description: >-
+  Deploy a Cloud Run job and configure a Cloud Scheduler trigger.
+  Authenticates via WIF, fetches runtime env vars from Secret Manager,
+  deploys the job image, and creates the Cloud Scheduler trigger if it
+  does not already exist.
+
+inputs:
+  gcp-wif-provider:
+    description: GCP WIF provider.
+    required: true
+  gcp-service-account:
+    description: Service account impersonated via WIF.
+    required: true
+  gcp-project-id:
+    description: GCP project ID.
+    required: true
+  gcp-region:
+    description: GCP region (e.g. us-central1).
+    required: true
+  gcp-repository:
+    description: Artifact Registry repository name.
+    required: true
+  image-name:
+    description: Docker image name within the Artifact Registry repository.
+    required: true
+  gcp-secret-name:
+    description: >-
+      Secret Manager secret holding runtime env vars as a JSON object.
+      Injected as Cloud Run job environment variables.
+    required: true
+  cloudrun-job:
+    description: Cloud Run job name.
+    required: true
+  cloudrun-flags:
+    description: >-
+      Extra flags forwarded verbatim to the Cloud Run job deploy command
+      (e.g. "--command=/app/server --args=worker --vpc-connector=my-connector").
+    required: false
+    default: ""
+  image-tag:
+    description: Image tag to deploy. Defaults to the commit SHA when empty.
+    required: false
+    default: ""
+  scheduler-name:
+    description: Cloud Scheduler trigger name (idempotent — skipped if already exists).
+    required: true
+  scheduler-schedule:
+    description: Cron schedule expression (e.g. "0 * * * *").
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Authenticate
+      uses: nurdsoft/ci-workflows/actions/auth@v2
+      with:
+        gcp-wif-provider: ${{ inputs.gcp-wif-provider }}
+        gcp-service-account: ${{ inputs.gcp-service-account }}
+
+    - name: Fetch runtime env vars from Secret Manager
+      id: secret
+      uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5  # v2.2.5
+      with:
+        secrets: |
+          ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
+
+    - name: Format env vars for Cloud Run
+      id: env_vars
+      shell: bash
+      env:
+        SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
+        PROJECT_ID: ${{ inputs.gcp-project-id }}
+      run: |
+        set -euo pipefail
+
+        if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
+          echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
+          exit 1
+        fi
+
+        while IFS= read -r line; do
+          [ -n "$line" ] && echo "::add-mask::$line"
+        done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
+
+        formatted=$(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON" | paste -sd, -)
+        echo "value=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},${formatted}" >> "$GITHUB_OUTPUT"
+
+    - name: Deploy Cloud Run job
+      uses: google-github-actions/deploy-cloudrun@251330ba9a8a34bfbc1622895f42e1d53fd14522  # v2.7.6
+      with:
+        job: ${{ inputs.cloudrun-job }}
+        image: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
+        region: ${{ inputs.gcp-region }}
+        flags: ${{ inputs.cloudrun-flags }}
+        env_vars: ${{ steps.env_vars.outputs.value }}
+        env_vars_update_strategy: overwrite
+
+    - name: Create Cloud Scheduler
+      shell: bash
+      env:
+        SCHEDULER_NAME: ${{ inputs.scheduler-name }}
+        REGION: ${{ inputs.gcp-region }}
+        PROJECT_ID: ${{ inputs.gcp-project-id }}
+        SCHEDULE: ${{ inputs.scheduler-schedule }}
+        SERVICE_ACCOUNT: ${{ inputs.gcp-service-account }}
+        JOB_NAME: ${{ inputs.cloudrun-job }}
+      run: |
+        set -euo pipefail
+
+        if gcloud scheduler jobs describe "$SCHEDULER_NAME" \
+           --location="$REGION" \
+           --project="$PROJECT_ID" >/dev/null 2>&1; then
+          echo "Scheduler '$SCHEDULER_NAME' already exists, skipping creation"
+        else
+          echo "Creating scheduler '$SCHEDULER_NAME'..."
+          gcloud scheduler jobs create http "$SCHEDULER_NAME" \
+            --location="$REGION" \
+            --schedule="$SCHEDULE" \
+            --time-zone="Etc/UTC" \
+            --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+            --http-method=POST \
+            --oidc-service-account-email="$SERVICE_ACCOUNT" \
+            --oidc-token-audience="https://${REGION}-run.googleapis.com/"
+        fi
+
+    - name: Summary
+      shell: bash
+      env:
+        JOB_NAME: ${{ inputs.cloudrun-job }}
+        REGION: ${{ inputs.gcp-region }}
+        IMAGE: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}
+        TAG: ${{ inputs.image-tag || github.sha }}
+        SCHEDULER_NAME: ${{ inputs.scheduler-name }}
+        SHA: ${{ github.sha }}
+      run: |
+        {
+          echo "### Deploy Job"
+          echo ""
+          echo "- Job: \`${JOB_NAME}\` (${REGION})"
+          echo "- Image: \`${IMAGE}:${TAG}\`"
+          echo "- Scheduler: \`${SCHEDULER_NAME}\`"
+          echo "- Commit: \`$SHA\`"
+        } >> "$GITHUB_STEP_SUMMARY"
