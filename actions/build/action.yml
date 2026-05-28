@@ -177,7 +177,7 @@ runs:
         retention-days: ${{ inputs.artifact-retention-days }}
 
     # -- Docker build path -----------------------------------------------------
-    - name: Configure Docker for Artifact Registry
+    - name: Configure Docker for Artifact Registry (build path)
       if: inputs.image-name != '' && inputs.ghcr-image == ''
       shell: bash
       env:
@@ -227,7 +227,7 @@ runs:
           ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:latest
 
     # -- Pull+retag path -------------------------------------------------------
-    - name: Configure Docker for Artifact Registry
+    - name: Configure Docker for Artifact Registry (retag path)
       if: inputs.ghcr-image != ''
       shell: bash
       env:
