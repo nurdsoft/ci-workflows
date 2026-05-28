@@ -10,8 +10,8 @@ description: >-
   The standard deploy steps are skipped entirely in this mode.
 
   Cloud Run job path: when `cloudrun-job` is set the action deploys a Cloud Run job
-  and optionally creates a Cloud Scheduler trigger (idempotent). Shares the same WIF
-  auth and Secret Manager fetch as the service path.
+  and optionally reconciles a Cloud Scheduler trigger (created if missing, updated if
+  existing). Shares the same WIF auth and Secret Manager fetch as the service path.
 
 inputs:
   # -- Static deploy inputs ---------------------------------------------------
@@ -116,7 +116,7 @@ inputs:
     required: false
     default: ""
   scheduler-name:
-    description: Cloud Scheduler trigger name (idempotent — skipped if already exists). Empty skips scheduler creation.
+    description: Cloud Scheduler trigger name. Reconciled on every deploy (created if missing, updated if existing). Empty skips scheduler management.
     required: false
     default: ""
   schedule-time:
@@ -154,6 +154,33 @@ runs:
         aws-role-arn: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}
 
+    # -- Shared: input validation (Cloud Run paths) ----------------------------
+    - name: Validate Cloud Run inputs
+      if: inputs.cloudrun-service != '' || inputs.cloudrun-job != ''
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        REGION: ${{ inputs.gcp-region }}
+        PROJECT_ID: ${{ inputs.gcp-project-id }}
+        REPOSITORY: ${{ inputs.gcp-repository }}
+        SCHEDULER_NAME: ${{ inputs.scheduler-name }}
+        SCHEDULE: ${{ inputs.schedule-time }}
+      run: |
+        set -euo pipefail
+        missing=()
+        [ -z "$IMAGE_NAME" ]   && missing+=("image-name")
+        [ -z "$REGION" ]       && missing+=("gcp-region")
+        [ -z "$PROJECT_ID" ]   && missing+=("gcp-project-id")
+        [ -z "$REPOSITORY" ]   && missing+=("gcp-repository")
+        if [ "${#missing[@]}" -gt 0 ]; then
+          echo "ERROR: Cloud Run deploy requires the following inputs: ${missing[*]}" >&2
+          exit 1
+        fi
+        if [ -n "$SCHEDULER_NAME" ] && [ -z "$SCHEDULE" ]; then
+          echo "ERROR: schedule-time is required when scheduler-name is set" >&2
+          exit 1
+        fi
+
     # -- Static path -----------------------------------------------------------
     - name: Deploy
       if: inputs.cloudrun-service == '' && inputs.cloudrun-job == ''
@@ -180,7 +207,7 @@ runs:
 
     - name: Format env vars for Cloud Run
       id: env_vars
-      if: (inputs.cloudrun-service != '' || inputs.cloudrun-job != '') && inputs.gcp-secret-name != ''
+      if: inputs.cloudrun-service != '' || inputs.cloudrun-job != ''
       shell: bash
       env:
         SECRET_JSON: ${{ steps.secret.outputs.ENV_VARS }}
@@ -188,17 +215,27 @@ runs:
       run: |
         set -euo pipefail
 
-        if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
-          echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
-          exit 1
+        # Validate + mask secret payload only when one was fetched.
+        if [ -n "$SECRET_JSON" ]; then
+          if ! jq -e 'type == "object"' <<<"$SECRET_JSON" >/dev/null; then
+            echo "ERROR: secret payload is not a JSON object of {key: value} pairs" >&2
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
         fi
 
-        while IFS= read -r line; do
-          [ -n "$line" ] && echo "::add-mask::$line"
-        done < <(jq -r '.[] | tostring' <<<"$SECRET_JSON")
-
-        formatted=$(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON" | paste -sd, -)
-        echo "value=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},${formatted}" >> "$GITHUB_OUTPUT"
+        # Emit env vars as newline-delimited KEY=VALUE so values containing
+        # commas survive. GOOGLE_CLOUD_PROJECT is always set in Cloud Run mode.
+        {
+          echo "value<<__GHA_EOF__"
+          echo "GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
+          if [ -n "$SECRET_JSON" ]; then
+            jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SECRET_JSON"
+          fi
+          echo "__GHA_EOF__"
+        } >> "$GITHUB_OUTPUT"
 
     # -- Cloud Run service path ------------------------------------------------
     - name: Deploy to Cloud Run service
@@ -224,7 +261,7 @@ runs:
         env_vars: ${{ steps.env_vars.outputs.value }}
         env_vars_update_strategy: overwrite
 
-    - name: Create Cloud Scheduler
+    - name: Reconcile Cloud Scheduler
       if: inputs.cloudrun-job != '' && inputs.scheduler-name != ''
       shell: bash
       env:
@@ -237,20 +274,33 @@ runs:
       run: |
         set -euo pipefail
 
+        URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
+        AUDIENCE="https://${REGION}-run.googleapis.com/"
+
         if gcloud scheduler jobs describe "$SCHEDULER_NAME" \
            --location="$REGION" \
            --project="$PROJECT_ID" >/dev/null 2>&1; then
-          echo "Scheduler '$SCHEDULER_NAME' already exists, skipping creation"
-        else
-          echo "Creating scheduler '$SCHEDULER_NAME'..."
-          gcloud scheduler jobs create http "$SCHEDULER_NAME" \
+          echo "Scheduler '$SCHEDULER_NAME' exists, reconciling configuration..."
+          gcloud scheduler jobs update http "$SCHEDULER_NAME" \
             --location="$REGION" \
+            --project="$PROJECT_ID" \
             --schedule="$SCHEDULE" \
             --time-zone="Etc/UTC" \
-            --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+            --uri="$URI" \
             --http-method=POST \
             --oidc-service-account-email="$SERVICE_ACCOUNT" \
-            --oidc-token-audience="https://${REGION}-run.googleapis.com/"
+            --oidc-token-audience="$AUDIENCE"
+        else
+          echo "Scheduler '$SCHEDULER_NAME' does not exist, creating..."
+          gcloud scheduler jobs create http "$SCHEDULER_NAME" \
+            --location="$REGION" \
+            --project="$PROJECT_ID" \
+            --schedule="$SCHEDULE" \
+            --time-zone="Etc/UTC" \
+            --uri="$URI" \
+            --http-method=POST \
+            --oidc-service-account-email="$SERVICE_ACCOUNT" \
+            --oidc-token-audience="$AUDIENCE"
         fi
 
     # -- Summary (all paths) ---------------------------------------------------
