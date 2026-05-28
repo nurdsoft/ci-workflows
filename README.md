@@ -170,7 +170,7 @@ jobs:
 
 **App pipeline — Docker + Cloud Run job with Cloud Scheduler**
 
-Activated by passing `cloudrun-job` to `deploy` instead of `cloudrun-service`. Optionally creates a Cloud Scheduler trigger (idempotent — skipped if already exists) when `scheduler-name` and `schedule-time` are set.
+Activated by passing `cloudrun-job` to `deploy` instead of `cloudrun-service`. Optionally reconciles a Cloud Scheduler trigger (created if missing, updated if existing) when `scheduler-name` and `schedule-time` are set.
 
 ```yaml
 jobs:
@@ -214,7 +214,7 @@ jobs:
             --command="/app/server"
             --args="worker"
             --vpc-connector=${{ secrets.VPC_CONNECTOR }}
-          scheduler-name: my-job-scheduler-trigger   # omit to skip scheduler creation
+          scheduler-name: my-job-scheduler-trigger   # omit to skip scheduler management
           schedule-time: "0 * * * *"                 # cron expression — hourly
 ```
 
@@ -266,8 +266,8 @@ and the `version.yml` reusable workflow.
 > against GCP Artifact Registry and Cloud Run directly. No Makefile targets required.
 >
 > **Cloud Run job path**: when `cloudrun-job` (deploy) is set instead of `cloudrun-service`, the action
-> deploys a Cloud Run job and optionally creates a Cloud Scheduler trigger. Pass `scheduler-name` and
-> `schedule-time` to enable scheduling; omit both to skip it.
+> deploys a Cloud Run job and optionally reconciles a Cloud Scheduler trigger (created if missing,
+> updated if existing). Pass `scheduler-name` and `schedule-time` to enable scheduling; omit both to skip it.
 >
 > **GHCR pull + retag path**: when `ghcr-image` (build) is also set, the action pulls the
 > pre-built image from GHCR and re-tags it for Artifact Registry instead of building from
