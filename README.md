@@ -13,12 +13,12 @@ behind a runner contract you control (or pass inline via `run`).
 
 | Path | Type | Function |
 |------|------|----------|
-| `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release |
+| `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release (stable or RC prerelease) |
 | `actions/auth`   | Action | Obtain cloud credentials (OIDC) |
 | `actions/setup`  | Action | Install runtime + deps (+ EAS login) |
 | `actions/verify` | Action | Lint / type-check / test |
-| `actions/build`  | Action | Produce a deployable artifact |
-| `actions/deploy` | Action | Ship the artifact |
+| `actions/build`  | Action | Produce a deployable artifact — static or Docker image |
+| `actions/deploy` | Action | Ship the artifact — static site, Cloud Run service, or Cloud Run job (+ optional Cloud Scheduler) |
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
 | `actions/notify` | Action | Post the pipeline result |
@@ -39,7 +39,7 @@ behind a runner contract you control (or pass inline via `run`).
 Callers wire the actions into a job graph and supply their own values. Two
 illustrative shapes:
 
-**App pipeline — verify, release, build, deploy**
+**App pipeline — static site (verify, release, build, deploy)**
 
 ```yaml
 jobs:
@@ -74,6 +74,148 @@ jobs:
           download-artifact: "true"
           gcp-wif-provider: ${{ secrets.WIF_PROVIDER }}
           gcp-service-account: ${{ secrets.SERVICE_ACCOUNT }}
+```
+
+**App pipeline — Docker + Cloud Run (release, build, deploy)**
+
+Activated by passing `image-name` to `build` and `cloudrun-service` to `deploy`. The static-build and static-deploy steps are skipped automatically — existing callers are unaffected.
+
+```yaml
+jobs:
+  version:
+    uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
+    permissions: { contents: write }
+    with:
+      rc-line: "1-rc"          # rc off non-default branches; stable on default
+
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/build@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}   # fetched → .env.production at build time
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/deploy@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          cloudrun-service: ${{ secrets.CLOUDRUN_SERVICE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}   # fetched → injected as Cloud Run env vars
+          cloudrun-flags: "--allow-unauthenticated --ingress=internal-and-cloud-load-balancing"
+```
+
+**App pipeline — GHCR pull + retag + Cloud Run (pre-built image)**
+
+For services whose Docker image is built and published to GHCR by a separate process (e.g. a commerce platform). Activated by passing `ghcr-image` to `build` alongside `image-name`. The action pulls the pre-built image, re-tags it for GCP Artifact Registry (SHA + latest), and pushes it — no Dockerfile or build-time secrets required. Takes priority over the Docker build+push path.
+
+```yaml
+jobs:
+  version:
+    uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
+    permissions: { contents: write }
+    with:
+      rc-line: "1-rc"
+
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/build@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REGISTRY }}
+          image-name: ${{ vars.SERVICE_NAME }}
+          ghcr-image: ghcr.io/org/repo:latest   # source image; triggers pull+retag path
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/deploy@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REGISTRY }}
+          image-name: ${{ vars.SERVICE_NAME }}
+          cloudrun-service: ${{ vars.SERVICE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}
+          cloudrun-flags: >-
+            --vpc-connector="${{ secrets.GCP_VPC_CONNECTOR }}"
+            --ingress=internal-and-cloud-load-balancing
+```
+
+**App pipeline — Docker + Cloud Run job with Cloud Scheduler**
+
+Activated by passing `cloudrun-job` to `deploy` instead of `cloudrun-service`. Optionally reconciles a Cloud Scheduler trigger (created if missing, updated if existing) when `scheduler-name` and `schedule-time` are set.
+
+```yaml
+jobs:
+  version:
+    uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
+    permissions: { contents: write }
+    with:
+      rc-line: "1-rc"
+
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/build@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}
+
+  deploy-job:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/deploy@v2
+        with:
+          gcp-wif-provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          gcp-service-account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          gcp-project-id: ${{ secrets.GCP_PROJECT_ID }}
+          gcp-region: ${{ secrets.GCP_REGION }}
+          gcp-repository: ${{ secrets.GCP_REPOSITORY }}
+          image-name: ${{ secrets.IMAGE_NAME }}
+          cloudrun-job: ${{ secrets.CLOUDRUN_JOB_NAME }}
+          gcp-secret-name: ${{ secrets.GCP_SECRET_NAME }}
+          cloudrun-flags: >-
+            --command="/app/server"
+            --args="worker"
+            --vpc-connector=${{ secrets.VPC_CONNECTOR }}
+          scheduler-name: my-job-scheduler-trigger   # omit to skip scheduler management
+          schedule-time: "0 * * * *"                 # cron expression — hourly
 ```
 
 **Infrastructure pipeline — plan then apply the same plan**
@@ -118,6 +260,18 @@ tool (`just`, `task`, `npm run`), or implement the default `make` targets.
 
 Self-contained — no contract, no Makefile: `auth`, `setup`, `verify`, `notify`,
 and the `version.yml` reusable workflow.
+
+> **Docker / Cloud Run path**: when `image-name` (build) or `cloudrun-service` / `cloudrun-job` (deploy) is set,
+> the runner contract is bypassed entirely — the action handles auth, build, and deploy
+> against GCP Artifact Registry and Cloud Run directly. No Makefile targets required.
+>
+> **Cloud Run job path**: when `cloudrun-job` (deploy) is set instead of `cloudrun-service`, the action
+> deploys a Cloud Run job and optionally reconciles a Cloud Scheduler trigger (created if missing,
+> updated if existing). Pass `scheduler-name` and `schedule-time` to enable scheduling; omit both to skip it.
+>
+> **GHCR pull + retag path**: when `ghcr-image` (build) is also set, the action pulls the
+> pre-built image from GHCR and re-tags it for Artifact Registry instead of building from
+> source. No Dockerfile or build-time secrets needed.
 
 ## Versioning
 
