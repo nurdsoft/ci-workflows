@@ -1,0 +1,96 @@
+name: Branch Protection Rules
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  revert-and-notify:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    environment: prod
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if merge commit
+        id: merge_check
+        run: |
+          PARENT_COUNT=$(git log -1 --pretty=format:%P | wc -w)
+          if [ "$PARENT_COUNT" -gt 1 ]; then
+            echo "is_merge=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_merge=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get actor real name
+        if: steps.merge_check.outputs.is_merge == 'false'
+        id: actor_info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REAL_NAME=$(gh api users/${{ github.actor }} --jq '.name')
+          if [ -z "$REAL_NAME" ] || [ "$REAL_NAME" = "null" ]; then
+            REAL_NAME="${{ github.actor }}"
+          fi
+          echo "name=$REAL_NAME" >> $GITHUB_OUTPUT
+
+      - name: Get commit title
+        if: steps.merge_check.outputs.is_merge == 'false'
+        id: commit_info
+        run: |
+          COMMIT_TITLE=$(git log -1 --pretty=format:%s | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+          echo "title=$COMMIT_TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Revert push to ${{ github.ref_name }}
+        if: steps.merge_check.outputs.is_merge == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git revert HEAD --no-edit
+          git push origin ${{ github.ref_name }}
+
+      - name: Notify Slack
+        if: steps.merge_check.outputs.is_merge == 'false'
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [
+                {
+                  "color": "#ff0000",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ":x: *Direct Commit to `${{ github.ref_name }}` Branch Not Allowed*\n\n*Pushed By:* `${{ steps.actor_info.outputs.name }}`\n*Repository:* `${{ github.event.repository.name }}`\n*Commit Message:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ steps.commit_info.outputs.title }}>\n\n> :memo: *Note:* Please use a feature branch and open a Pull Request instead."
+                      }
+                    },
+                    {
+                      "type": "actions",
+                      "elements": [
+                        {
+                          "type": "button",
+                          "text": {
+                            "type": "plain_text",
+                            "text": "View Pipeline Run"
+                          },
+                          "style": "danger",
+                          "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
