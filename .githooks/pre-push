@@ -1,0 +1,31 @@
+#!/bin/bash
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+if [[ -z "$branch" ]]; then
+  echo "⚠️  Could not determine branch name (detached HEAD?). Skipping check."
+  exit 0
+fi
+
+if [[ "$branch" == "main" ]]; then
+  echo "❌ BLOCKED: Direct pushes to 'main' are not allowed."
+  echo ""
+  echo "✅ Create a feature/fix branch and open a PR instead:"
+  echo "   git checkout -b feat/<description>"
+  echo "   git push origin feat/<description>"
+  echo "   # Then open a Pull Request on GitHub"
+  exit 1
+fi
+
+if ! [[ "$branch" =~ ^(main|(feat|fix|chore|hotfix|ci|docs|refactor)/.+)$ ]]; then
+  echo "❌ BLOCKED: Branch '$branch' does not follow naming convention."
+  echo ""
+  echo "✅ Allowed formats:"
+  echo "   main | <type>/<description>"
+  echo "   where <type> ∈ feat | fix | chore | hotfix | ci | docs | refactor"
+  echo ""
+  echo "📌 Examples:"
+  echo "   git checkout -b feat/docker-build-cloudrun-actions"
+  echo "   git checkout -b fix/scheduler-reconcile"
+  exit 1
+fi
