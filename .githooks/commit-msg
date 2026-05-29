@@ -9,13 +9,13 @@ if echo "$commit_msg" | grep -qE "^Merge "; then
 fi
 
 # Pattern: <type>[(<scope>)][!]: <description>
-if ! echo "$commit_msg" | grep -qE "^(feat|fix|chore|docs|ci|refactor|test|perf)(\([a-z0-9/-]+\))?(!)?: .+$"; then
+if ! echo "$commit_msg" | grep -qE "^(feat|fix|chore|hotfix|docs)(\([a-z0-9/-]+\))?(!)?: .+$"; then
   echo ""
   echo "❌ BLOCKED: Commit message does not follow convention."
   echo ""
   echo "✅ Format:  <type>[(<scope>)]: <description>"
   echo ""
-  echo "📌 Types:   feat | fix | chore | docs | ci | refactor | test | perf"
+  echo "📌 Types:   feat | fix | chore | hotfix | docs"
   echo ""
   echo "📌 Examples:"
   echo "   feat(deploy): add Cloud Run job support"

@@ -17,12 +17,12 @@ if [[ "$branch" == "main" ]]; then
   exit 1
 fi
 
-if ! [[ "$branch" =~ ^(main|(feat|fix|chore|hotfix|ci|docs|refactor)/.+)$ ]]; then
+if ! [[ "$branch" =~ ^(main|(feat|fix|chore|hotfix|docs)/.+)$ ]]; then
   echo "❌ BLOCKED: Branch '$branch' does not follow naming convention."
   echo ""
   echo "✅ Allowed formats:"
   echo "   main | <type>/<description>"
-  echo "   where <type> ∈ feat | fix | chore | hotfix | ci | docs | refactor"
+  echo "   where <type> ∈ feat | fix | chore | hotfix | docs"
   echo ""
   echo "📌 Examples:"
   echo "   git checkout -b feat/docker-build-cloudrun-actions"
