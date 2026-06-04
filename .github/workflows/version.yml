@@ -1,19 +1,25 @@
 name: Version
 
-# Reusable workflow that cuts a SemVer release with go-semantic-release. It owns
-# the rc-vs-stable decision by detecting the repository's default branch, so
-# callers cannot mis-trigger an rc on the default branch. It runs in its own job
-# with `contents: write` (needed to push tags / the changelog), isolating that
-# privilege from the rest of the pipeline.
+# Reusable workflow that cuts a SemVer release with go-semantic-release.
+#
+# All three versioning concerns run in a single job with `contents: write`:
+#
+#   1. Detect rc-line — on non-default branches, reads the latest stable release
+#      tag and derives the RC prerelease line dynamically (e.g. v2.0.0 → "2-rc").
+#      Handles the breaking-change edge case where the major series changes and
+#      callers can't know the correct rc-line ahead of time.
+#
+#   2. Release — runs go-semantic-release with the detected rc-line (RC on
+#      non-default branches, stable on the default branch).
+#
+#   3. Create next RC baseline — after a stable release on the default branch,
+#      automatically creates the next minor RC prerelease tag on rc-branch
+#      (e.g. v2.0.0 → v2.1.0-rc.1) so the next push to rc-branch always has
+#      a baseline to increment from. Idempotent — no-ops if the tag exists.
 
 on:
   workflow_call:
     inputs:
-      rc-line:
-        description: 'rc prerelease line used ONLY on non-default branches (e.g. 1-rc). Empty = stable on all branches.'
-        type: string
-        required: false
-        default: ''
       changelog-on-default:
         description: 'Generate + commit CHANGELOG.md on the default branch.'
         type: boolean
@@ -29,6 +35,11 @@ on:
         type: string
         required: false
         default: ''
+      rc-branch:
+        description: 'Branch where RC releases are cut. Used to create the next RC baseline after a stable release on the default branch.'
+        type: string
+        required: false
+        default: 'dev'
     outputs:
       version:
         description: 'The version produced, or empty if no release was cut.'
@@ -62,12 +73,35 @@ jobs:
           fi
           chmod +x ./semantic-release
 
+      - name: Detect latest stable release
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CURRENT_REF: ${{ github.ref_name }}
+        run: |
+          if [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ]; then
+            echo "Branch is $CURRENT_REF (default) — stable release, no rc-line needed"
+            echo "rc-line=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-pre-releases \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName')
+          major=$(echo "${latest#v}" | cut -d. -f1)
+          major=${major:-1}
+          echo "Latest stable: ${latest:-none} → rc-line: ${major}-rc"
+          echo "rc-line=${major}-rc" >> "$GITHUB_OUTPUT"
+
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           CURRENT_REF: ${{ github.ref_name }}
-          RC_LINE: ${{ inputs.rc-line }}
+          RC_LINE: ${{ steps.detect.outputs.rc-line }}
           WITH_CHANGELOG: ${{ inputs.changelog-on-default }}
         run: |
           set -- --token "$GH_TOKEN" --version-file --allow-no-changes
@@ -96,3 +130,27 @@ jobs:
             git diff --staged --quiet || git commit -m "docs: update changelog for v$(cat .version) [skip ci]"
             git push origin "HEAD:$BRANCH"
           fi
+
+      - name: Create next RC baseline
+        if: github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_BRANCH: ${{ inputs.rc-branch }}
+        run: |
+          [ -f .version ] || exit 0
+          version="$(cat .version)"
+          major=$(echo "$version" | cut -d. -f1)
+          minor=$(echo "$version" | cut -d. -f2)
+          next_minor=$((minor + 1))
+          next_rc="v${major}.${next_minor}.0-rc.1"
+          echo "Stable: v${version} → Next RC baseline: $next_rc on ${RC_BRANCH}"
+          if gh release view "$next_rc" --repo "$GITHUB_REPOSITORY" &>/dev/null 2>&1; then
+            echo "${next_rc} already exists, skipping."
+            exit 0
+          fi
+          gh release create "$next_rc" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RC_BRANCH" \
+            --title "$next_rc" \
+            --notes "RC baseline — created automatically after v${version} was promoted to stable." \
+            --prerelease
