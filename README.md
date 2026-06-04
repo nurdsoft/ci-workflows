@@ -13,7 +13,7 @@ behind a runner contract you control (or pass inline via `run`).
 
 | Path | Type | Function |
 |------|------|----------|
-| `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release (stable or RC prerelease) |
+| `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release — detects RC line, cuts the release, and creates the next RC baseline automatically |
 | `actions/auth`   | Action | Obtain cloud credentials (OIDC) |
 | `actions/setup`  | Action | Install runtime + deps (+ EAS login) |
 | `actions/verify` | Action | Lint / type-check / test |
@@ -52,8 +52,6 @@ jobs:
     needs: [verify]
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
-    with:
-      rc-line: "1-rc"          # rc off non-default branches; stable on default
 
   build:
     needs: [version]
@@ -85,8 +83,6 @@ jobs:
   version:
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
-    with:
-      rc-line: "1-rc"          # rc off non-default branches; stable on default
 
   build:
     needs: [version]
@@ -130,8 +126,6 @@ jobs:
   version:
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
-    with:
-      rc-line: "1-rc"
 
   build:
     needs: [version]
@@ -177,8 +171,6 @@ jobs:
   version:
     uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v2
     permissions: { contents: write }
-    with:
-      rc-line: "1-rc"
 
   build:
     needs: [version]
