@@ -73,7 +73,7 @@ jobs:
           fi
           chmod +x ./semantic-release
 
-      - name: Detect rc-line from latest stable release
+      - name: Detect latest stable release
         id: detect
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
