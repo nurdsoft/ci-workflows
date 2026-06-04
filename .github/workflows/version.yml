@@ -12,7 +12,7 @@ name: Version
 #   2. Release — runs go-semantic-release with the detected rc-line (RC on
 #      non-default branches, stable on the default branch).
 #
-#   3. Seed next RC baseline — after a stable release on the default branch,
+#   3. Create next RC baseline — after a stable release on the default branch,
 #      automatically creates the next minor RC prerelease tag on rc-branch
 #      (e.g. v2.0.0 → v2.1.0-rc.1) so the next push to rc-branch always has
 #      a baseline to increment from. Idempotent — no-ops if the tag exists.
@@ -36,7 +36,7 @@ on:
         required: false
         default: ''
       rc-branch:
-        description: 'Branch where RC releases are cut. Used to seed the next RC baseline after a stable release on the default branch.'
+        description: 'Branch where RC releases are cut. Used to create the next RC baseline after a stable release on the default branch.'
         type: string
         required: false
         default: 'dev'
@@ -131,7 +131,7 @@ jobs:
             git push origin "HEAD:$BRANCH"
           fi
 
-      - name: Seed next RC baseline
+      - name: Create next RC baseline
         if: github.ref_name == github.event.repository.default_branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
