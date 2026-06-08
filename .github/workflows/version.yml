@@ -114,10 +114,8 @@ jobs:
           if [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ -n "$RC_LINE" ]; then
             set -- "$@" --prerelease --maintained-version "$RC_LINE"
           fi
-          if [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_DEFAULT" = "true" ]; then
-            set -- "$@" --changelog CHANGELOG.md --prepend-changelog
-          fi
-          if [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_RC" = "true" ]; then
+          if { [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_DEFAULT" = "true" ]; } || \
+             { [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_RC" = "true" ]; }; then
             set -- "$@" --changelog CHANGELOG.md --prepend-changelog
           fi
           ./semantic-release "$@"
