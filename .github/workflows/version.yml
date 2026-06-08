@@ -25,6 +25,11 @@ on:
         type: boolean
         required: false
         default: true
+      changelog-on-rc:
+        description: 'Generate + commit CHANGELOG.md on RC (non-default) branches.'
+        type: boolean
+        required: false
+        default: false
       semrel-version:
         description: 'go-semantic-release binary version.'
         type: string
@@ -102,13 +107,15 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           CURRENT_REF: ${{ github.ref_name }}
           RC_LINE: ${{ steps.detect.outputs.rc-line }}
-          WITH_CHANGELOG: ${{ inputs.changelog-on-default }}
+          WITH_CHANGELOG_DEFAULT: ${{ inputs.changelog-on-default }}
+          WITH_CHANGELOG_RC: ${{ inputs.changelog-on-rc }}
         run: |
           set -- --token "$GH_TOKEN" --version-file --allow-no-changes
           if [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ -n "$RC_LINE" ]; then
             set -- "$@" --prerelease --maintained-version "$RC_LINE"
           fi
-          if [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG" = "true" ]; then
+          if { [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_DEFAULT" = "true" ]; } || \
+             { [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_RC" = "true" ]; }; then
             set -- "$@" --changelog CHANGELOG.md --prepend-changelog
           fi
           ./semantic-release "$@"
@@ -119,7 +126,9 @@ jobs:
           if [ -f .version ]; then echo "version=$(cat .version)" >> "$GITHUB_OUTPUT"; fi
 
       - name: Commit changelog
-        if: inputs.changelog-on-default
+        if: |
+          (inputs.changelog-on-default && github.ref_name == github.event.repository.default_branch) ||
+          (inputs.changelog-on-rc && github.ref_name != github.event.repository.default_branch)
         env:
           BRANCH: ${{ github.ref_name }}
         run: |

@@ -235,6 +235,35 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 ```
 
+## version.yml — inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `changelog-on-default` | boolean | `true` | Generate + commit `CHANGELOG.md` on the default branch (stable releases). |
+| `changelog-on-rc` | boolean | `false` | Generate + commit `CHANGELOG.md` on RC (non-default) branches. Set to `true` if you want a running changelog on `dev` as well. |
+| `rc-branch` | string | `dev` | Branch where RC releases are cut. Used to create the next RC baseline after a stable release. |
+| `semrel-version` | string | `v2.31.0` | go-semantic-release binary version. |
+| `semrel-sha256` | string | `''` | Expected SHA-256 of the binary for integrity verification. Empty skips the check (logs a warning). |
+
+**Changelog behaviour**
+
+| Branch | `changelog-on-default` | `changelog-on-rc` | Result |
+|--------|------------------------|-------------------|--------|
+| `main` | `true` | any | `CHANGELOG.md` generated and committed on every stable release |
+| `dev` | any | `true` | `CHANGELOG.md` generated and committed on every RC release |
+| `dev` | any | `false` (default) | No changelog on dev — commit step is skipped entirely |
+
+Example — changelog on both branches:
+
+```yaml
+version:
+  uses: nurdsoft/ci-workflows/.github/workflows/version.yml@v3
+  permissions: { contents: write }
+  with:
+    changelog-on-default: true
+    changelog-on-rc: true
+```
+
 ## Runner contract
 
 Phase actions (`build`, `deploy`, `plan`, `apply`) run a command — supply it any
