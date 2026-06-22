@@ -262,6 +262,11 @@ runs:
         env_vars_update_strategy: overwrite
 
     - name: Reconcile Cloud Scheduler
+      # Auth: --oauth-service-account-email (NOT --oidc-...). The Cloud Run
+      # admin API V1 endpoint (`apis/run.googleapis.com/v1/.../jobs/<job>:run`)
+      # requires an OAuth2 access token; GCP began rejecting OIDC ID tokens
+      # against this endpoint on 2026-05-29, causing every previously-working
+      # scheduler to start failing with 401 UNAUTHENTICATED.
       if: inputs.cloudrun-job != '' && inputs.scheduler-name != ''
       shell: bash
       env:
@@ -275,7 +280,6 @@ runs:
         set -euo pipefail
 
         URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
-        AUDIENCE="https://${REGION}-run.googleapis.com/"
 
         if gcloud scheduler jobs describe "$SCHEDULER_NAME" \
            --location="$REGION" \
@@ -288,8 +292,7 @@ runs:
             --time-zone="Etc/UTC" \
             --uri="$URI" \
             --http-method=POST \
-            --oidc-service-account-email="$SERVICE_ACCOUNT" \
-            --oidc-token-audience="$AUDIENCE"
+            --oauth-service-account-email="$SERVICE_ACCOUNT"
         else
           echo "Scheduler '$SCHEDULER_NAME' does not exist, creating..."
           gcloud scheduler jobs create http "$SCHEDULER_NAME" \
@@ -299,8 +302,7 @@ runs:
             --time-zone="Etc/UTC" \
             --uri="$URI" \
             --http-method=POST \
-            --oidc-service-account-email="$SERVICE_ACCOUNT" \
-            --oidc-token-audience="$AUDIENCE"
+            --oauth-service-account-email="$SERVICE_ACCOUNT"
         fi
 
     # -- Summary (all paths) ---------------------------------------------------

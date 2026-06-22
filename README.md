@@ -210,6 +210,16 @@ jobs:
           schedule-time: "0 * * * *"                 # cron expression — hourly
 ```
 
+**Cloud Scheduler IAM prerequisite**
+
+When `scheduler-name` and `schedule-time` are set, the deploy step creates a Cloud Scheduler trigger that invokes the Cloud Run job as the deploy SA. For the scheduler to impersonate that SA, the Cloud Scheduler service agent `service-<PROJECT_NUMBER>@gcp-sa-cloudscheduler.iam.gserviceaccount.com` must hold `roles/iam.serviceAccountTokenCreator` on the deploy SA. Existing projects with prior Cloud Scheduler usage already have this binding; new consumers must add it explicitly — without it the trigger is created successfully but never fires.
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding "<DEPLOY_SA_EMAIL>" \
+  --member="serviceAccount:service-<PROJECT_NUMBER>@gcp-sa-cloudscheduler.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+```
+
 **Infrastructure pipeline — plan then apply the same plan**
 
 ```yaml
