@@ -12,21 +12,77 @@ inputs:
     required: false
     default: ""
   label:
-    description: Short label for the message (app / component name).
+    description: Short label for the message (app / component name), e.g. "Frontend".
     required: false
     default: Deployment
   version:
-    description: Version string shown in the message.
+    description: Optional version string; shown as an extra line when provided.
     required: false
     default: ""
   channel:
     description: "Chat channel: slack (only slack implemented today)."
     required: false
     default: slack
+  github-token:
+    description: >-
+      Token used to resolve the deployer's display name via the GitHub API.
+      Falls back to the actor's username when empty or the lookup fails.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
+    # Compose the message once: result-based color/header, the commit title
+    # (git, falling back to the push payload) and the deployer's display name.
+    - name: Build Slack message
+      id: prep
+      if: inputs.webhook-url != '' && inputs.channel == 'slack'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RESULT: ${{ inputs.result }}
+        LABEL: ${{ inputs.label }}
+        VERSION: ${{ inputs.version }}
+        ACTOR: ${{ github.actor }}
+        SERVER_URL: ${{ github.server_url }}
+        REPOSITORY: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+        HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+      run: |
+        # Result-based visuals.
+        if [ "$RESULT" = "success" ]; then
+          echo "color=#36a64f" >> "$GITHUB_OUTPUT"
+          echo "button_style=primary" >> "$GITHUB_OUTPUT"
+          HEADER=":white_check_mark: *${LABEL} Deployed Successfully*"
+        else
+          echo "color=#ff0000" >> "$GITHUB_OUTPUT"
+          echo "button_style=danger" >> "$GITHUB_OUTPUT"
+          HEADER=":x: *${LABEL} Deployment Failed*"
+        fi
+
+        # Deployer display name: GitHub API name, fall back to the username.
+        REAL_NAME=""
+        if [ -n "$GH_TOKEN" ]; then
+          REAL_NAME=$(gh api "users/${ACTOR}" --jq '.name' 2>/dev/null || true)
+        fi
+        if [ -z "$REAL_NAME" ] || [ "$REAL_NAME" = "null" ]; then
+          REAL_NAME="$ACTOR"
+        fi
+
+        # Commit title: prefer the checked-out repo, fall back to the push payload.
+        TITLE=$(git log -1 --pretty=format:%s 2>/dev/null || true)
+        if [ -z "$TITLE" ]; then
+          TITLE=$(printf '%s' "$HEAD_COMMIT_MSG" | head -n1)
+        fi
+
+        # Single mrkdwn string (\n escapes, so it stays valid JSON in the payload).
+        TEXT="${HEADER}\n*Commit Message:* <${SERVER_URL}/${REPOSITORY}/commit/${SHA}|${TITLE}>\n*Deployed By:* \`${REAL_NAME}\`"
+        if [ -n "$VERSION" ]; then
+          TEXT="${TEXT}\n*Version:* \`${VERSION}\`"
+        fi
+        echo "text=$TEXT" >> "$GITHUB_OUTPUT"
+
     - name: Post to Slack
       if: inputs.webhook-url != '' && inputs.channel == 'slack'
       uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c  # v3.0.3
@@ -34,7 +90,34 @@ runs:
         webhook-type: incoming-webhook
         payload: |
           {
-            "text": "${{ inputs.result == 'success' && ':white_check_mark:' || ':x:' }} ${{ inputs.label }}: ${{ inputs.result == 'success' && 'succeeded' || 'failed' }}  |  version `${{ inputs.version || 'n/a' }}`  |  <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
+            "attachments": [
+              {
+                "color": "${{ steps.prep.outputs.color }}",
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "${{ steps.prep.outputs.text }}"
+                    }
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "text": {
+                          "type": "plain_text",
+                          "text": "View Pipeline Run"
+                        },
+                        "style": "${{ steps.prep.outputs.button_style }}",
+                        "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
           }
       env:
         SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
