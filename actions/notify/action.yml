@@ -33,9 +33,12 @@ inputs:
 runs:
   using: composite
   steps:
-    # Compose the message once: result-based color/header, the commit title
-    # (git, falling back to the push payload) and the deployer's display name.
-    - name: Build Slack message
+    # Compose the whole payload here with jq so every interpolated value
+    # (commit title, deployer, version) is JSON-escaped — a quote or backslash
+    # in a commit message can never produce invalid JSON. Optional lines are
+    # only added when their data is present, so non-deploy announces (manual
+    # dispatch, DNS cutover) stay clean instead of showing empty fields.
+    - name: Build Slack payload
       id: prep
       if: inputs.webhook-url != '' && inputs.channel == 'slack'
       shell: bash
@@ -45,21 +48,32 @@ runs:
         LABEL: ${{ inputs.label }}
         VERSION: ${{ inputs.version }}
         ACTOR: ${{ github.actor }}
-        SERVER_URL: ${{ github.server_url }}
-        REPOSITORY: ${{ github.repository }}
-        SHA: ${{ github.sha }}
+        COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
       run: |
         # Result-based visuals.
         if [ "$RESULT" = "success" ]; then
-          echo "color=#36a64f" >> "$GITHUB_OUTPUT"
-          echo "button_style=primary" >> "$GITHUB_OUTPUT"
+          COLOR="#36a64f"; STYLE="primary"
           HEADER=":white_check_mark: *${LABEL} Deployed Successfully*"
         else
-          echo "color=#ff0000" >> "$GITHUB_OUTPUT"
-          echo "button_style=danger" >> "$GITHUB_OUTPUT"
+          COLOR="#ff0000"; STYLE="danger"
           HEADER=":x: *${LABEL} Deployment Failed*"
         fi
+
+        # Build the mrkdwn body as a list of lines; lines with no data are
+        # never appended, so a manual/DNS announce stays clean. jq joins and
+        # escapes them, so the body is valid JSON regardless of content.
+        LINES=("$HEADER")
+
+        # Commit title: prefer the checked-out repo, fall back to the push
+        # payload. May be empty (e.g. workflow_dispatch with no checkout) — in
+        # that case the commit line is skipped entirely.
+        TITLE=$(git log -1 --pretty=format:%s 2>/dev/null || true)
+        if [ -z "$TITLE" ]; then
+          TITLE=$(printf '%s' "$HEAD_COMMIT_MSG" | head -n1)
+        fi
+        [ -n "$TITLE" ] && LINES+=("*Commit Message:* <${COMMIT_URL}|${TITLE}>")
 
         # Deployer display name: GitHub API name, fall back to the username.
         REAL_NAME=""
@@ -69,55 +83,46 @@ runs:
         if [ -z "$REAL_NAME" ] || [ "$REAL_NAME" = "null" ]; then
           REAL_NAME="$ACTOR"
         fi
+        [ -n "$REAL_NAME" ] && LINES+=("*Deployed By:* \`${REAL_NAME}\`")
 
-        # Commit title: prefer the checked-out repo, fall back to the push payload.
-        TITLE=$(git log -1 --pretty=format:%s 2>/dev/null || true)
-        if [ -z "$TITLE" ]; then
-          TITLE=$(printf '%s' "$HEAD_COMMIT_MSG" | head -n1)
-        fi
+        [ -n "$VERSION" ] && LINES+=("*Version:* \`${VERSION}\`")
 
-        # Single mrkdwn string (\n escapes, so it stays valid JSON in the payload).
-        TEXT="${HEADER}\n*Commit Message:* <${SERVER_URL}/${REPOSITORY}/commit/${SHA}|${TITLE}>\n*Deployed By:* \`${REAL_NAME}\`"
-        if [ -n "$VERSION" ]; then
-          TEXT="${TEXT}\n*Version:* \`${VERSION}\`"
-        fi
-        echo "text=$TEXT" >> "$GITHUB_OUTPUT"
+        # jq joins the lines with real newlines (encoded as \n in JSON) and
+        # escapes every value — a quote or backslash anywhere can never break
+        # the payload.
+        PAYLOAD=$(jq -nc \
+          --arg color "$COLOR" \
+          --arg style "$STYLE" \
+          --arg url "$RUN_URL" \
+          '{
+            attachments: [
+              {
+                color: $color,
+                blocks: [
+                  { type: "section", text: { type: "mrkdwn", text: ($ARGS.positional | join("\n")) } },
+                  { type: "actions", elements: [
+                    { type: "button",
+                      text: { type: "plain_text", text: "View Pipeline Run" },
+                      style: $style,
+                      url: $url }
+                  ] }
+                ]
+              }
+            ]
+          }' \
+          --args "${LINES[@]}")
+
+        {
+          echo "payload<<PAYLOAD_EOF"
+          echo "$PAYLOAD"
+          echo "PAYLOAD_EOF"
+        } >> "$GITHUB_OUTPUT"
 
     - name: Post to Slack
       if: inputs.webhook-url != '' && inputs.channel == 'slack'
       uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c  # v3.0.3
       with:
         webhook-type: incoming-webhook
-        payload: |
-          {
-            "attachments": [
-              {
-                "color": "${{ steps.prep.outputs.color }}",
-                "blocks": [
-                  {
-                    "type": "section",
-                    "text": {
-                      "type": "mrkdwn",
-                      "text": "${{ steps.prep.outputs.text }}"
-                    }
-                  },
-                  {
-                    "type": "actions",
-                    "elements": [
-                      {
-                        "type": "button",
-                        "text": {
-                          "type": "plain_text",
-                          "text": "View Pipeline Run"
-                        },
-                        "style": "${{ steps.prep.outputs.button_style }}",
-                        "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                      }
-                    ]
-                  }
-                ]
-              }
-            ]
-          }
+        payload: ${{ steps.prep.outputs.payload }}
       env:
         SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
