@@ -21,7 +21,7 @@ behind a runner contract you control (or pass inline via `run`).
 | `actions/deploy` | Action | Ship the artifact — static site, Cloud Run service, or Cloud Run job (+ optional Cloud Scheduler) |
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
-| `actions/notify` | Action | Post the pipeline result |
+| `actions/notify` | Action | Post the pipeline result as a rich Slack card |
 
 ## Design
 
@@ -272,6 +272,65 @@ version:
   with:
     changelog-on-default: true
     changelog-on-rc: true
+```
+
+## notify — inputs
+
+Posts a rich Slack card for a pipeline result: a green/red header
+(`<label> — succeeded|failed`), a Version field, and the **PR** this deploy
+traces to (title + clickable `owner/repo#NN`). With no PR it falls back to the
+**commit** (subject + clickable short SHA), and with neither to a single-line
+text message. A context line shows the author and a link to the run.
+Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
+post never fails the pipeline.
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `result` | yes | — | `success` / `failure` — e.g. a deploy job's `result`. Anything other than `success` renders as failed. |
+| `webhook-url` | no | `''` | Slack incoming webhook URL. Empty makes the action a no-op. |
+| `label` | no | `Deployment` | Short label for the card header (app / component name). |
+| `version` | no | `''` | Version string shown in the Version field (`n/a` if empty). |
+| `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
+| `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
+| `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
+| `target-sha` | no | `${{ github.sha }}` | Exact built/deployed commit SHA used to resolve the PR/commit. |
+
+Example — same-repo deploy (token/target default to this repo):
+
+```yaml
+  announce:
+    needs: deploy
+    if: ${{ always() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions: { contents: read, pull-requests: read }
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/notify@v3
+        with:
+          result: ${{ needs.deploy.result }}
+          label: "Backend (${{ github.ref_name == 'prod' && 'Prod' || 'Dev' }})"
+          version: ${{ needs.deploy.outputs.version }}
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+```
+
+Example — cross-org deploy (card describes a PR/commit in another repo):
+
+```yaml
+      - uses: actions/create-github-app-token@v1
+        id: core-token
+        with:
+          app-id: ${{ vars.LOGIXA_READ_APP_ID }}
+          private-key: ${{ secrets.LOGIXA_READ_APP_KEY }}
+          owner: logixa-hq
+          repositories: frontend-web
+      - uses: nurdsoft/ci-workflows/actions/notify@v3
+        with:
+          result: ${{ needs.deploy.result }}
+          label: "Frontend v2 (Prod / new UI)"
+          version: ${{ needs.build.outputs.core_version }}
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          github-token: ${{ steps.core-token.outputs.token }}
+          target-repo: logixa-hq/frontend-web
+          target-sha: ${{ needs.build.outputs.core_sha }}
 ```
 
 ## Runner contract
