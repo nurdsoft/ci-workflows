@@ -1,7 +1,9 @@
 name: Notify
 description: >-
-  Post a pipeline result to a chat channel. Best-effort: with no webhook the
-  action is a no-op and succeeds, so a missing webhook never fails the pipeline.
+  Post a pipeline result to a chat channel as a rich card. Resolves the deploy's
+  PR (or commit) to show title, version, author and a run link. Best-effort:
+  with no webhook the action is a no-op and succeeds, so a missing webhook never
+  fails the pipeline.
 
 inputs:
   result:
@@ -23,18 +25,119 @@ inputs:
     description: "Chat channel: slack (only slack implemented today)."
     required: false
     default: slack
+  github-token:
+    description: >-
+      Token used to read the PR / commit that this deploy traces to. For a
+      same-repo deploy the default job token is enough; for a cross-org deploy
+      (target-repo differs from this repo) pass a token minted in the caller
+      from a GitHub App with read access to target-repo.
+    required: false
+    default: ${{ github.token }}
+  target-repo:
+    description: >-
+      owner/repo whose PR/commit the card describes. Defaults to the repo the
+      workflow runs in; override for a cross-repo deploy.
+    required: false
+    default: ${{ github.repository }}
+  target-sha:
+    description: >-
+      The exact commit SHA that was built & deployed, used to resolve the PR /
+      commit shown on the card. Defaults to this workflow's commit.
+    required: false
+    default: ${{ github.sha }}
 
 runs:
   using: composite
   steps:
     - name: Post to Slack
-      if: inputs.webhook-url != '' && inputs.channel == 'slack'
-      uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c  # v3.0.3
-      with:
-        webhook-type: incoming-webhook
-        payload: |
-          {
-            "text": "${{ inputs.result == 'success' && ':white_check_mark:' || ':x:' }} ${{ inputs.label }}: ${{ inputs.result == 'success' && 'succeeded' || 'failed' }}  |  version `${{ inputs.version || 'n/a' }}`  |  <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
-          }
+      if: inputs.channel == 'slack'
+      shell: bash
       env:
-        SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        RESULT: ${{ inputs.result }}
+        LABEL: ${{ inputs.label }}
+        VERSION: ${{ inputs.version }}
+        WEBHOOK: ${{ inputs.webhook-url }}
+        TARGET_REPO: ${{ inputs.target-repo }}
+        TARGET_SHA: ${{ inputs.target-sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -uo pipefail
+
+        if [ -z "${WEBHOOK:-}" ]; then
+          echo "No SLACK_WEBHOOK_URL configured; skipping notification."
+          exit 0
+        fi
+
+        emoji=":x:"; color="#D32F2F"; status="failed"
+        if [ "${RESULT:-}" = "success" ]; then
+          emoji=":white_check_mark:"; color="#2E7D32"; status="succeeded"
+        fi
+        version="${VERSION:-}"; [ -z "$version" ] && version="n/a"
+        short_sha="${TARGET_SHA:0:7}"
+
+        # Prefer the PR this deploy traces to (a merge commit on dev/prod resolves
+        # to its PR); fall back to the commit itself, then to a plain line.
+        pr_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}/pulls" \
+          -H "Accept: application/vnd.github+json" 2>/dev/null || echo '[]')"
+        sel="$(jq -c 'if (type=="array" and length>0) then ([.[]|select(.merged_at!=null)][0] // .[0]) else {} end' <<<"$pr_json")"
+        pr_num="$(jq -r '.number // empty' <<<"$sel")"
+
+        if [ -n "$pr_num" ]; then
+          # PR card: title + number + link (no commit bullets).
+          pr_title="$(jq -r '.title // ""' <<<"$sel")"
+          pr_url="$(jq -r '.html_url // ""' <<<"$sel")"
+          pr_user="$(jq -r '.user.login // "unknown"' <<<"$sel")"
+          payload="$(jq -n \
+            --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
+            --arg version "$version" --arg prlabel "${TARGET_REPO}#${pr_num}" --arg title "$pr_title" \
+            --arg user "$pr_user" --arg runurl "$RUN_URL" --arg prurl "$pr_url" '
+            def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+            { attachments: [{ color: $color, blocks: [
+                { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
+                { type:"section", fields:[
+                    { type:"mrkdwn", text:("*Version*\n" + $version) },
+                    { type:"mrkdwn", text:("*PR*\n" + (if $prurl != "" then "<" + $prurl + "|" + $prlabel + ">" else $prlabel end)) } ]},
+                { type:"section", text:{ type:"mrkdwn", text:("*" + ($title|esc) + "*") } },
+                { type:"context", elements:[
+                    { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   🔗 <" + $runurl + "|view run>") } ]}
+            ]}]}')"
+        else
+          # No PR -> show the commit that triggered this deploy (target-sha).
+          commit_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}" 2>/dev/null || echo '{}')"
+          c_subject="$(jq -r '.commit.message // "" | split("\n")[0] // ""' <<<"$commit_json")"
+          c_author="$(jq -r '.author.login // .commit.author.name // "unknown"' <<<"$commit_json")"
+          c_url="$(jq -r '.html_url // ""' <<<"$commit_json")"
+
+          if [ -n "$c_subject" ]; then
+            # Commit card: subject + short SHA (linked) + author.
+            payload="$(jq -n \
+              --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
+              --arg version "$version" --arg short "$short_sha" --arg cmurl "$c_url" \
+              --arg subject "$c_subject" --arg user "$c_author" --arg runurl "$RUN_URL" '
+              def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+              { attachments: [{ color: $color, blocks: [
+                  { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
+                  { type:"section", fields:[
+                      { type:"mrkdwn", text:("*Version*\n" + $version) },
+                      { type:"mrkdwn", text:("*Commit*\n" + (if $cmurl != "" then "<" + $cmurl + "|" + $short + ">" else "`" + $short + "`" end)) } ]},
+                  { type:"section", text:{ type:"mrkdwn", text:("*" + ($subject|esc) + "*") } },
+                  { type:"context", elements:[
+                      { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   🔗 <" + $runurl + "|view run>") } ]}
+              ]}]}')"
+          else
+            # Fallback - nothing resolved: original single-line text format.
+            payload="$(jq -n \
+              --arg text "${emoji} ${LABEL}: ${status}  |  version \`${version}\`  |  <${RUN_URL}|view run>" \
+              '{ text: $text }')"
+          fi
+        fi
+
+        # -f makes curl fail on HTTP >=400 so Slack payload rejections surface in
+        # the log instead of being silently reported as a successful send.
+        if curl -fsS -X POST -H 'Content-Type: application/json' --data "$payload" "$WEBHOOK" >/dev/null; then
+          echo "Slack notification sent."
+        else
+          echo "Slack notification failed (ignored, best-effort)."
+        fi
+        exit 0
