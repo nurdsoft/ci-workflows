@@ -315,7 +315,7 @@ Example — same-repo deploy (token/target default to this repo):
 Example — cross-org deploy (card describes a PR/commit in another repo):
 
 ```yaml
-      - uses: actions/create-github-app-token@v1
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
         id: app-token
         with:
           app-id: ${{ vars.READ_APP_ID }}

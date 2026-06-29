@@ -3,7 +3,9 @@ description: >-
   Post a pipeline result to a chat channel as a rich card. Resolves the deploy's
   PR (or commit) to show title, version, author and a run link. Best-effort:
   with no webhook the action is a no-op and succeeds, so a missing webhook never
-  fails the pipeline.
+  fails the pipeline. The PR/commit lookup needs `pull-requests: read` and
+  `contents: read` on the calling job; without them the card silently falls back
+  to commit-only details.
 
 inputs:
   result:
