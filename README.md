@@ -280,7 +280,10 @@ Posts a rich Slack card for a pipeline result: a green/red header
 (`<label> — succeeded|failed`), a Version field, and the **PR** this deploy
 traces to (title + clickable `owner/repo#NN`). With no PR it falls back to the
 **commit** (subject + clickable short SHA), and with neither to a single-line
-text message. A context line shows the author and a link to the run.
+text message. A context line shows the author, the UTC build date
+(`YYYY.MM.DD`), and a link to the run. The build date is stamped by the action
+so the deploy date reads unambiguously rather than being inferred from Slack's
+local-timezone message timestamp.
 Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
 post never fails the pipeline.
 
