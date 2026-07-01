@@ -78,6 +78,10 @@ runs:
         version="${VERSION:-}"; [ -z "$version" ] && version="n/a"
         short_sha="${TARGET_SHA:0:7}"
 
+        # Build date in UTC (YYYY.MM.DD), shown on the card so the deploy date is
+        # unambiguous rather than inferred from Slack's local-timezone timestamp.
+        built_utc="$(date -u +%Y.%m.%d)"
+
         # Prefer the PR this deploy traces to (a merge commit on dev/prod resolves
         # to its PR); fall back to the commit itself, then to a plain line.
         pr_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}/pulls" \
@@ -93,7 +97,8 @@ runs:
           payload="$(jq -n \
             --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
             --arg version "$version" --arg prlabel "${TARGET_REPO}#${pr_num}" --arg title "$pr_title" \
-            --arg user "$pr_user" --arg runurl "$RUN_URL" --arg prurl "$pr_url" '
+            --arg user "$pr_user" --arg runurl "$RUN_URL" --arg prurl "$pr_url" \
+            --arg built "$built_utc" '
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
             { attachments: [{ color: $color, blocks: [
                 { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
@@ -102,7 +107,7 @@ runs:
                     { type:"mrkdwn", text:("*PR*\n" + (if $prurl != "" then "<" + $prurl + "|" + $prlabel + ">" else $prlabel end)) } ]},
                 { type:"section", text:{ type:"mrkdwn", text:("*" + ($title|esc) + "*") } },
                 { type:"context", elements:[
-                    { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   🔗 <" + $runurl + "|view run>") } ]}
+                    { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   📅 " + $built + " UTC   ·   🔗 <" + $runurl + "|view run>") } ]}
             ]}]}')"
         else
           # No PR -> show the commit that triggered this deploy (target-sha).
@@ -116,7 +121,8 @@ runs:
             payload="$(jq -n \
               --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
               --arg version "$version" --arg short "$short_sha" --arg cmurl "$c_url" \
-              --arg subject "$c_subject" --arg user "$c_author" --arg runurl "$RUN_URL" '
+              --arg subject "$c_subject" --arg user "$c_author" --arg runurl "$RUN_URL" \
+              --arg built "$built_utc" '
               def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
               { attachments: [{ color: $color, blocks: [
                   { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
@@ -125,12 +131,12 @@ runs:
                       { type:"mrkdwn", text:("*Commit*\n" + (if $cmurl != "" then "<" + $cmurl + "|" + $short + ">" else "`" + $short + "`" end)) } ]},
                   { type:"section", text:{ type:"mrkdwn", text:("*" + ($subject|esc) + "*") } },
                   { type:"context", elements:[
-                      { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   🔗 <" + $runurl + "|view run>") } ]}
+                      { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   📅 " + $built + " UTC   ·   🔗 <" + $runurl + "|view run>") } ]}
               ]}]}')"
           else
             # Fallback - nothing resolved: original single-line text format.
             payload="$(jq -n \
-              --arg text "${emoji} ${LABEL}: ${status}  |  version \`${version}\`  |  <${RUN_URL}|view run>" \
+              --arg text "${emoji} ${LABEL}: ${status}  |  version \`${version}\`  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" \
               '{ text: $text }')"
           fi
         fi
