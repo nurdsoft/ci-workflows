@@ -200,7 +200,7 @@ runs:
     - name: Fetch runtime env vars from Secret Manager
       id: secret
       if: (inputs.cloudrun-service != '' || inputs.cloudrun-job != '') && inputs.gcp-secret-name != ''
-      uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5  # v2.2.5
+      uses: google-github-actions/get-secretmanager-secrets@bc9c54b29fdffb8a47776820a7d26e77b379d262  # v3.0.0
       with:
         secrets: |
           ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
@@ -240,7 +240,7 @@ runs:
     # -- Cloud Run service path ------------------------------------------------
     - name: Deploy to Cloud Run service
       if: inputs.cloudrun-service != ''
-      uses: google-github-actions/deploy-cloudrun@251330ba9a8a34bfbc1622895f42e1d53fd14522  # v2.7.6
+      uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d  # v3.0.1
       with:
         service: ${{ inputs.cloudrun-service }}
         image: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
@@ -252,7 +252,7 @@ runs:
     # -- Cloud Run job path ----------------------------------------------------
     - name: Deploy to Cloud Run job
       if: inputs.cloudrun-job != ''
-      uses: google-github-actions/deploy-cloudrun@251330ba9a8a34bfbc1622895f42e1d53fd14522  # v2.7.6
+      uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d  # v3.0.1
       with:
         job: ${{ inputs.cloudrun-job }}
         image: ${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project-id }}/${{ inputs.gcp-repository }}/${{ inputs.image-name }}:${{ inputs.image-tag || github.sha }}
