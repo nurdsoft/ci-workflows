@@ -190,7 +190,7 @@ runs:
     - name: Fetch build env vars from Secret Manager
       id: secret
       if: inputs.image-name != '' && inputs.gcp-secret-name != '' && inputs.ghcr-image == ''
-      uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5  # v2.2.5
+      uses: google-github-actions/get-secretmanager-secrets@bc9c54b29fdffb8a47776820a7d26e77b379d262  # v3.0.0
       with:
         secrets: |
           ENV_VARS:projects/${{ inputs.gcp-project-id }}/secrets/${{ inputs.gcp-secret-name }}/versions/latest
@@ -216,11 +216,11 @@ runs:
 
     - name: Setup Docker Buildx
       if: inputs.image-name != '' && inputs.ghcr-image == ''
-      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
     - name: Build and push Docker image
       if: inputs.image-name != '' && inputs.ghcr-image == ''
-      uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
       with:
         context: ${{ inputs.context }}
         file: ${{ inputs.dockerfile }}
