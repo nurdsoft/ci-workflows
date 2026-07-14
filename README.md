@@ -287,12 +287,22 @@ local-timezone message timestamp.
 Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
 post never fails the pipeline.
 
+The `header`, `color`, and `status` inputs turn the same card into a general
+**alert** (e.g. a revert or guard notice) instead of a deploy result: supply a
+custom title and color bar, and the first field becomes **Status** instead of
+**Version**. The PR/commit resolution, body, and context line are unchanged, so
+the card still shows the PR (or commit) that `target-sha` traces to. Omit all
+three and the card is exactly the deploy-result card above.
+
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `result` | yes | — | `success` / `failure` — e.g. a deploy job's `result`. Anything other than `success` renders as failed. |
 | `webhook-url` | no | `''` | Slack incoming webhook URL. Empty makes the action a no-op. |
 | `label` | no | `Deployment` | Short label for the card header (app / component name). |
 | `version` | no | `''` | Version string shown in the Version field (`n/a` if empty). |
+| `header` | no | `''` | Full header line, verbatim, overriding the default `<emoji> <label> — <status>`. May contain Slack emoji shortcodes. |
+| `color` | no | `''` | Attachment bar color (hex) overriding the result-derived green/red. |
+| `status` | no | `''` | When set, the first field renders as **Status** with this text in place of the **Version** field. |
 | `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
 | `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
 | `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
