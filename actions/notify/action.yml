@@ -1,11 +1,11 @@
 name: Notify
 description: >-
   Post a pipeline result to a chat channel as a rich card. Resolves the deploy's
-  PR (or commit) to show title, version, author and a run link. Best-effort:
-  with no webhook the action is a no-op and succeeds, so a missing webhook never
-  fails the pipeline. The PR/commit lookup needs `pull-requests: read` and
-  `contents: read` on the calling job; without them the card silently falls back
-  to commit-only details.
+  PR (or commit) to show title, version, author, hash, duration, and a run link.
+  Auto-fetches pipeline duration and (on failure) the failing step name via the
+  GitHub Actions API — caller must grant `actions: read` on the notify job.
+  Best-effort: with no webhook the action is a no-op and succeeds, so a missing
+  webhook never fails the pipeline.
 
 inputs:
   result:
@@ -16,11 +16,21 @@ inputs:
     required: false
     default: ""
   label:
-    description: Short label for the message (app / component name).
+    description: >-
+      Short label for the message header (app / component name). Rendered
+      alongside `version`. Prefer a bare name ("Commerce Backend") — the Slack
+      channel already implies the environment.
     required: false
     default: Deployment
   version:
-    description: Version string shown in the message.
+    description: Version string shown in the header, next to the label (e.g. `v2.1.0`).
+    required: false
+    default: ""
+  deployed-url:
+    description: >-
+      Fully-qualified URL of the deployed app (shown only on success). The card
+      strips protocol and trailing slash for display, and links back to the full
+      URL. Caller resolves per-environment.
     required: false
     default: ""
   channel:
@@ -29,10 +39,10 @@ inputs:
     default: slack
   github-token:
     description: >-
-      Token used to read the PR / commit that this deploy traces to. For a
-      same-repo deploy the default job token is enough; for a cross-org deploy
-      (target-repo differs from this repo) pass a token minted in the caller
-      from a GitHub App with read access to target-repo.
+      Token used to read the PR/commit, the workflow run, and (on failure) the
+      run's jobs. Same-repo deploy: the default job token is enough. Cross-org
+      deploy: pass a token minted in the caller from a GitHub App with read
+      access to target-repo. Requires `actions: read` on the notify job.
     required: false
     default: ${{ github.token }}
   target-repo:
@@ -58,9 +68,11 @@ runs:
         RESULT: ${{ inputs.result }}
         LABEL: ${{ inputs.label }}
         VERSION: ${{ inputs.version }}
+        DEPLOYED_URL: ${{ inputs.deployed-url }}
         WEBHOOK: ${{ inputs.webhook-url }}
         TARGET_REPO: ${{ inputs.target-repo }}
         TARGET_SHA: ${{ inputs.target-sha }}
+        RUN_ID: ${{ github.run_id }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
@@ -71,74 +83,130 @@ runs:
           exit 0
         fi
 
-        emoji=":x:"; color="#D32F2F"; status="failed"
+        # Status → icon + subtitle.
+        icon=":x:"; subtitle="Deploy failed"; is_success=0
         if [ "${RESULT:-}" = "success" ]; then
-          emoji=":white_check_mark:"; color="#2E7D32"; status="succeeded"
+          icon=":white_check_mark:"; subtitle="Deploy succeeded"; is_success=1
         fi
+
         version="${VERSION:-}"; [ -z "$version" ] && version="n/a"
         short_sha="${TARGET_SHA:0:7}"
-
-        # Build date in UTC (YYYY.MM.DD), shown on the card so the deploy date is
-        # unambiguous rather than inferred from Slack's local-timezone timestamp.
         built_utc="$(date -u +%Y.%m.%d)"
 
-        # Prefer the PR this deploy traces to (a merge commit on dev/prod resolves
-        # to its PR); fall back to the commit itself, then to a plain line.
+        # -- Duration: pull run_started_at, compute elapsed vs now.
+        # Falls back silently if the API call fails.
+        duration=""
+        run_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}" 2>/dev/null || echo '{}')"
+        started_at="$(jq -r '.run_started_at // .created_at // empty' <<<"$run_json")"
+        if [ -n "$started_at" ]; then
+          started_epoch="$(date -u -d "$started_at" +%s 2>/dev/null || echo '')"
+          if [ -n "$started_epoch" ]; then
+            now_epoch="$(date -u +%s)"
+            elapsed=$(( now_epoch - started_epoch ))
+            if [ "$elapsed" -lt 0 ]; then elapsed=0; fi
+            if [ "$elapsed" -lt 60 ]; then
+              duration="${elapsed}s"
+            else
+              duration="$((elapsed / 60))m $((elapsed % 60))s"
+            fi
+          fi
+        fi
+
+        # -- Failed step name: first step across all jobs with conclusion=failure.
+        # Only fetched on failure; falls back silently.
+        failed_step=""
+        if [ "$is_success" -eq 0 ]; then
+          jobs_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}/jobs" 2>/dev/null || echo '{}')"
+          failed_step="$(jq -r '[.jobs[]? | .steps[]?] | map(select(.conclusion == "failure")) | .[0].name // ""' <<<"$jobs_json")"
+        fi
+
+        # -- Resolve PR (preferred) or commit for the header rows.
         pr_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}/pulls" \
           -H "Accept: application/vnd.github+json" 2>/dev/null || echo '[]')"
         sel="$(jq -c 'if (type=="array" and length>0) then ([.[]|select(.merged_at!=null)][0] // .[0]) else {} end' <<<"$pr_json")"
         pr_num="$(jq -r '.number // empty' <<<"$sel")"
 
+        commit_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}" 2>/dev/null || echo '{}')"
+        commit_subject="$(jq -r '.commit.message // "" | split("\n")[0] // ""' <<<"$commit_json")"
+        # Prefer git-metadata display name over the raw GitHub login.
+        commit_author="$(jq -r '.commit.author.name // .author.login // "unknown"' <<<"$commit_json")"
+        commit_url="$(jq -r '.html_url // ""' <<<"$commit_json")"
+
         if [ -n "$pr_num" ]; then
-          # PR card: title + number + link (no commit bullets).
           pr_title="$(jq -r '.title // ""' <<<"$sel")"
           pr_url="$(jq -r '.html_url // ""' <<<"$sel")"
-          pr_user="$(jq -r '.user.login // "unknown"' <<<"$sel")"
-          payload="$(jq -n \
-            --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
-            --arg version "$version" --arg prlabel "${TARGET_REPO}#${pr_num}" --arg title "$pr_title" \
-            --arg user "$pr_user" --arg runurl "$RUN_URL" --arg prurl "$pr_url" \
-            --arg built "$built_utc" '
-            def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
-            { attachments: [{ color: $color, blocks: [
-                { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
-                { type:"section", fields:[
-                    { type:"mrkdwn", text:("*Version*\n" + $version) },
-                    { type:"mrkdwn", text:("*PR*\n" + (if $prurl != "" then "<" + $prurl + "|" + $prlabel + ">" else $prlabel end)) } ]},
-                { type:"section", text:{ type:"mrkdwn", text:("*" + ($title|esc) + "*") } },
-                { type:"context", elements:[
-                    { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   📅 " + $built + " UTC   ·   🔗 <" + $runurl + "|view run>") } ]}
-            ]}]}')"
+          pr_label="${TARGET_REPO}#${pr_num}"
+          # PR title beats commit subject when available.
+          [ -n "$pr_title" ] && commit_subject="$pr_title"
         else
-          # No PR -> show the commit that triggered this deploy (target-sha).
-          commit_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}" 2>/dev/null || echo '{}')"
-          c_subject="$(jq -r '.commit.message // "" | split("\n")[0] // ""' <<<"$commit_json")"
-          c_author="$(jq -r '.author.login // .commit.author.name // "unknown"' <<<"$commit_json")"
-          c_url="$(jq -r '.html_url // ""' <<<"$commit_json")"
+          pr_url=""; pr_label=""
+        fi
 
-          if [ -n "$c_subject" ]; then
-            # Commit card: subject + short SHA (linked) + author.
-            payload="$(jq -n \
-              --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
-              --arg version "$version" --arg short "$short_sha" --arg cmurl "$c_url" \
-              --arg subject "$c_subject" --arg user "$c_author" --arg runurl "$RUN_URL" \
-              --arg built "$built_utc" '
-              def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
-              { attachments: [{ color: $color, blocks: [
-                  { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
-                  { type:"section", fields:[
-                      { type:"mrkdwn", text:("*Version*\n" + $version) },
-                      { type:"mrkdwn", text:("*Commit*\n" + (if $cmurl != "" then "<" + $cmurl + "|" + $short + ">" else "`" + $short + "`" end)) } ]},
-                  { type:"section", text:{ type:"mrkdwn", text:("*" + ($subject|esc) + "*") } },
-                  { type:"context", elements:[
-                      { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   📅 " + $built + " UTC   ·   🔗 <" + $runurl + "|view run>") } ]}
-              ]}]}')"
-          else
-            # Fallback - nothing resolved: original single-line text format.
-            payload="$(jq -n \
-              --arg text "${emoji} ${LABEL}: ${status}  |  version \`${version}\`  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" \
-              '{ text: $text }')"
-          fi
+        # -- URL display: strip protocol + trailing slash.
+        url_display=""
+        if [ -n "${DEPLOYED_URL:-}" ]; then
+          url_display="$(printf '%s' "$DEPLOYED_URL" | sed -E 's|^https?://||; s|/+$||')"
+        fi
+
+        # Fallback path: neither PR nor commit resolved → single-line message.
+        if [ -z "$commit_subject" ] && [ -z "$pr_num" ]; then
+          payload="$(jq -n \
+            --arg text "${icon} ${LABEL} ${version}: ${subtitle}  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" \
+            '{ text: $text }')"
+        else
+          # -- Build the field pairs (label, value) in order.
+          # Success: COMMIT, PR, AUTHOR, HASH, DURATION, DATE, URL   (7 rows)
+          # Failure: FAILED AT, COMMIT, PR, AUTHOR, HASH, DURATION, DATE  (7 rows)
+          fields_json="$(jq -n \
+            --arg is_success "$is_success" \
+            --arg failed_step "$failed_step" \
+            --arg subject "$commit_subject" \
+            --arg pr_label "$pr_label" --arg pr_url "$pr_url" \
+            --arg author "$commit_author" \
+            --arg short_sha "$short_sha" --arg commit_url "$commit_url" \
+            --arg duration "$duration" \
+            --arg built "$built_utc" \
+            --arg url_display "$url_display" --arg url_full "$DEPLOYED_URL" '
+            def mrk(t): { type: "mrkdwn", text: t };
+            def row(k; v): [ mrk("*" + k + "*"), mrk(v) ];
+            def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+
+            ( if $is_success == "0" and $failed_step != "" then
+                row("FAILED AT"; ":red_circle: " + ($failed_step|esc))
+              else [] end )
+            + ( if $subject != "" then row("COMMIT"; ($subject|esc)) else [] end )
+            + ( if $pr_label != "" then
+                  row("PR"; (if $pr_url != "" then "<" + $pr_url + "|" + $pr_label + ">" else $pr_label end))
+                else [] end )
+            + row("AUTHOR"; ($author|esc))
+            + row("HASH"; (if $commit_url != "" then "<" + $commit_url + "|`" + $short_sha + "`>" else "`" + $short_sha + "`" end))
+            + ( if $duration != "" then row("DURATION"; $duration) else [] end )
+            + row("DATE"; $built + " UTC")
+            + ( if $is_success == "1" and $url_display != "" then
+                  row("URL"; "<" + $url_full + "|" + $url_display + ">")
+                else [] end )
+          ')"
+
+          # Split into chunks of at most 10 fields per section (Block Kit limit).
+          payload="$(jq -n \
+            --arg icon "$icon" --arg label "$LABEL" --arg version "$version" \
+            --arg subtitle "$subtitle" --arg runurl "$RUN_URL" \
+            --argjson fields "$fields_json" '
+            def chunk10:
+              . as $f
+              | [ range(0; ($f|length); 10) as $i | { type:"section", fields: $f[$i:$i+10] } ];
+
+            { blocks:
+              ( [ { type:"header", text:{ type:"plain_text", text:($icon + " " + $label + " " + $version), emoji:true } },
+                  { type:"context", elements:[ { type:"mrkdwn", text: $subtitle } ] }
+                ]
+                + ($fields | chunk10)
+                + [ { type:"actions", elements:[
+                      { type:"button",
+                        text:{ type:"plain_text", text:"View run" },
+                        url: $runurl } ] } ]
+              )
+            }')"
         fi
 
         # -f makes curl fail on HTTP >=400 so Slack payload rejections surface in
