@@ -14,7 +14,7 @@ behind a runner contract you control (or pass inline via `run`).
 | Path | Type | Function |
 |------|------|----------|
 | `.github/workflows/version.yml` | Reusable workflow | Cut a SemVer release — detects RC line, cuts the release, and creates the next RC baseline automatically |
-| `.github/workflows/empty-pr-guard.yml` | Reusable workflow | Merge-time gate — revert a merge whose PR had an empty description, alert Slack, and emit `block` so the caller stands its release down |
+| `.github/workflows/empty-pr-guard.yml` | Reusable workflow | Merge-time gate — revert a merge whose PR had an empty description and emit `block` (+ alert content) so the caller stands its release down and posts the alert |
 | `actions/auth`   | Action | Obtain cloud credentials (OIDC) |
 | `actions/setup`  | Action | Install runtime + deps (+ EAS login) |
 | `actions/verify` | Action | Lint / type-check / test |
@@ -275,28 +275,40 @@ version:
     changelog-on-rc: true
 ```
 
-## empty-pr-guard.yml — inputs
+## empty-pr-guard.yml — inputs & outputs
 
 Merge-time gate that enforces non-empty PR descriptions. Call it as the **first
 job** of your pipeline, gated to the branch you protect. On a push whose merge
 commit traces to a PR with an empty (or whitespace-only) body, it reverts the
-merge on that branch, edits the PR to explain, posts a Slack card (via
-`notify`), and sets `block=true`; wire your downstream jobs to stand down when
-`needs.<guard>.outputs.block == 'true'`. A PR-fetch API error fails **safe**
-(skips, never false-reverts); a rejected push or a revert conflict keeps
-`block=true` and the Slack card asks for a manual revert.
+merge on that branch, edits the PR to explain, and sets `block=true`; wire your
+downstream jobs to stand down when `needs.<guard>.outputs.block == 'true'`. A
+PR-fetch API error fails **safe** (skips, never false-reverts); a rejected push
+or a revert conflict keeps `block=true` and reports "revert by hand".
 
 It reverts a merge commit via `git revert -m 1` and a squash/rebase merge via
 the `before..HEAD` range, so all three GitHub merge styles are fully undone.
 
+The workflow does **not** post to Slack itself: the webhook is an environment
+secret, and `secrets: inherit` can't deliver an env secret to a reusable
+workflow across an org boundary. It needs **no secrets** (revert + PR edit use
+`GITHUB_TOKEN`), and instead **emits the alert content** as outputs — render the
+card in a caller job that declares the environment (see the example).
+
 | Input | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `environment` | string | yes | — | Caller environment to run under; its secrets must expose `SLACK_WEBHOOK_URL`. Required because the webhook is an environment secret and a reusable-workflow caller job cannot declare an environment itself. |
-| `label` | string | no | `Service` | Short name shown in the Slack alert header (e.g. `Backend`, `Web`). |
+| `label` | string | no | `Service` | Short name shown in the alert header the caller renders (e.g. `Backend`, `Web`). |
 
-Output `block` (`'true'`/`'false'`) — gate downstream jobs on it. Pass
-`secrets: inherit` so `SLACK_WEBHOOK_URL` resolves from the caller's
-environment, and grant `contents: write` + `pull-requests: write`.
+| Output | Description |
+|--------|-------------|
+| `block` | `'true'` when the merge was reverted and the caller's release must stand down. |
+| `outcome` | Empty when nothing was done; else `reverted` \| `push_failed` \| `conflict`. Gate the notify job on `outcome != ''`. |
+| `header` | Alert header line for the caller's Slack card. |
+| `color` | Alert colour bar (hex) for the caller's Slack card. |
+| `reason` | Alert status line for the caller's Slack card. |
+
+Grant `contents: write` + `pull-requests: write` on the guard job. To surface
+the alert, add a job that declares the environment holding `SLACK_WEBHOOK_URL`
+and renders the card via `notify` from the guard's outputs.
 
 ```yaml
 jobs:
@@ -305,9 +317,23 @@ jobs:
     permissions: { contents: write, pull-requests: write }
     uses: nurdsoft/ci-workflows/.github/workflows/empty-pr-guard.yml@v3
     with:
-      environment: dev
       label: Backend
-    secrets: inherit
+
+  guard-notify:                       # renders the Slack card the guard can't
+    needs: [guard]
+    if: ${{ always() && needs.guard.outputs.outcome != '' }}
+    runs-on: ubuntu-latest
+    environment: dev                  # so ${{ secrets.SLACK_WEBHOOK_URL }} resolves
+    permissions: { contents: read, pull-requests: read }
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/notify@v3
+        with:
+          result: failure
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          label: Backend
+          header: ${{ needs.guard.outputs.header }}
+          color: ${{ needs.guard.outputs.color }}
+          status: ${{ needs.guard.outputs.reason }}
 
   release:
     needs: [guard]
