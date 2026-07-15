@@ -83,10 +83,11 @@ runs:
           exit 0
         fi
 
-        # Status → icon + subtitle.
-        icon=":x:"; subtitle="Deploy failed"; is_success=0
+        # Status icon only. Header emoji conveys success/failure — no separate
+        # subtitle line under it.
+        icon=":x:"; is_success=0
         if [ "${RESULT:-}" = "success" ]; then
-          icon=":white_check_mark:"; subtitle="Deploy succeeded"; is_success=1
+          icon=":white_check_mark:"; is_success=1
         fi
 
         version="${VERSION:-}"; [ -z "$version" ] && version="n/a"
@@ -112,12 +113,16 @@ runs:
           fi
         fi
 
-        # -- Failed step name: first step across all jobs with conclusion=failure.
-        # Only fetched on failure; falls back silently.
+        # -- Failed job name: the first pipeline stage (job) with conclusion=failure.
+        # We surface the JOB name — not a step name — because inner steps of
+        # composite actions are opaque to the /jobs endpoint (only the outer
+        # `Run owner/repo/actions/name@ref` wrapper is visible), which makes
+        # step-level names misleading. Job names ("Build", "Deploy", …) are
+        # always human-meaningful and match what users see in the Actions UI.
         failed_step=""
         if [ "$is_success" -eq 0 ]; then
           jobs_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}/jobs" 2>/dev/null || echo '{}')"
-          failed_step="$(jq -r '[.jobs[]? | .steps[]?] | map(select(.conclusion == "failure")) | .[0].name // ""' <<<"$jobs_json")"
+          failed_step="$(jq -r '[.jobs[]? | select(.conclusion == "failure")] | .[0].name // ""' <<<"$jobs_json")"
         fi
 
         # -- Resolve PR (preferred) or commit for the header rows.
@@ -151,32 +156,21 @@ runs:
         # Fallback path: neither PR nor commit resolved → single-line message.
         if [ -z "$commit_subject" ] && [ -z "$pr_num" ]; then
           payload="$(jq -n \
-            --arg text "${icon} ${LABEL} ${version}: ${subtitle}  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" \
+            --arg text "${icon} ${LABEL} ${version}  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" \
             '{ text: $text }')"
         else
-          # -- COMMIT + PR live as full-width mrkdwn lines above the field grid.
-          # Slack's section.fields is a 2-col grid that wraps values past ~45
-          # chars per column; long commit subjects and PR refs wrap ugly there.
-          # A single mrkdwn block spans the whole card width instead.
-          # `-r` is required: without it jq emits a JSON-encoded string with a
-          # literal `\n` two-char sequence, which Slack renders verbatim.
-          header_lines="$(jq -n -r \
-            --arg subject "$commit_subject" \
-            --arg pr_label "$pr_label" --arg pr_url "$pr_url" '
-            def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
-            [ ( if $subject != "" then "*COMMIT*  " + ($subject|esc) else empty end ),
-              ( if $pr_label != "" then
-                  "*PR*  " + (if $pr_url != "" then "<" + $pr_url + "|" + $pr_label + ">" else $pr_label end)
-                else empty end )
-            ] | join("\n")
-          ')"
-
-          # -- Field grid holds the short, tabular rows only.
-          # Success: AUTHOR, HASH, DURATION, DATE, URL       (5 rows)
-          # Failure: FAILED AT, AUTHOR, HASH, DURATION, DATE (5 rows)
+          # -- All fields share the same 2-col label/value grid for a single
+          # uniform block — same label column, same value-column start.
+          # Order (success): COMMIT, PR, AUTHOR, HASH, DURATION, DATE, URL
+          # Order (failure): FAILED AT, COMMIT, PR, AUTHOR, HASH, DURATION, DATE
+          # Trade-off: Slack section.fields wraps values past ~45 chars per
+          # column, so long commit subjects will span two lines. Uniformity
+          # is preferred over wrap-avoidance here.
           fields_json="$(jq -n \
             --arg is_success "$is_success" \
             --arg failed_step "$failed_step" \
+            --arg subject "$commit_subject" \
+            --arg pr_label "$pr_label" --arg pr_url "$pr_url" \
             --arg author "$commit_author" \
             --arg short_sha "$short_sha" --arg commit_url "$commit_url" \
             --arg duration "$duration" \
@@ -187,8 +181,12 @@ runs:
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
 
             ( if $is_success == "0" and $failed_step != "" then
-                row("FAILED AT"; ":red_circle: " + ($failed_step|esc))
+                row("FAILED AT"; ($failed_step|esc))
               else [] end )
+            + ( if $subject != "" then row("COMMIT"; ($subject|esc)) else [] end )
+            + ( if $pr_label != "" then
+                  row("PR"; (if $pr_url != "" then "<" + $pr_url + "|" + $pr_label + ">" else $pr_label end))
+                else [] end )
             + row("AUTHOR"; ($author|esc))
             + row("HASH"; (if $commit_url != "" then "<" + $commit_url + "|`" + $short_sha + "`>" else "`" + $short_sha + "`" end))
             + ( if $duration != "" then row("DURATION"; $duration) else [] end )
@@ -199,23 +197,17 @@ runs:
           ')"
 
           # Split fields into chunks of at most 10 per section (Block Kit limit).
-          # header_lines is omitted from the blocks list when empty (no PR, no commit subject).
+          # Header emoji conveys status; no separate context/subtitle block.
           payload="$(jq -n \
             --arg icon "$icon" --arg label "$LABEL" --arg version "$version" \
-            --arg subtitle "$subtitle" --arg runurl "$RUN_URL" \
-            --arg header_lines "$header_lines" \
+            --arg runurl "$RUN_URL" \
             --argjson fields "$fields_json" '
             def chunk10:
               . as $f
               | [ range(0; ($f|length); 10) as $i | { type:"section", fields: $f[$i:$i+10] } ];
 
             { blocks:
-              ( [ { type:"header", text:{ type:"plain_text", text:($icon + " " + $label + " " + $version), emoji:true } },
-                  { type:"context", elements:[ { type:"mrkdwn", text: $subtitle } ] }
-                ]
-                + ( if $header_lines != "" then
-                      [ { type:"section", text:{ type:"mrkdwn", text: $header_lines } } ]
-                    else [] end )
+              ( [ { type:"header", text:{ type:"plain_text", text:($icon + " " + $label + " " + $version), emoji:true } } ]
                 + ($fields | chunk10)
                 + [ { type:"actions", elements:[
                       { type:"button",
