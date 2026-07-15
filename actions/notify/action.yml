@@ -179,15 +179,18 @@ runs:
             --arg url_display "$url_display" --arg url_full "$DEPLOYED_URL" '
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
             # `label` is a jq reserved keyword (label/break), so name this `padlabel`.
-            # Bold label + trailing NBSP (\u00a0) padding for column alignment.
-            # Slack collapses runs of regular ASCII spaces in mrkdwn to a single
-            # space, so plain-space padding is useless; NBSPs render individually
-            # and preserve spacing. The Slack renderer uses a variable-width font
-            # so alignment is approximate (a bold letter is wider than a space
-            # glyph), but the value column drift is small and consistent.
+            # Bold label + trailing EM SPACE (\u2003) padding for column alignment.
+            # An em space is the fonts em width (~font size in px), which in
+            # Slacks Lato font renders at roughly the same visual width as a
+            # bold letter. So `bold_char_width * N_letters + em_width * N_padding`
+            # collapses to ~`em_width * (N_letters + N_padding)` = constant for
+            # all labels padded to 12 chars total. NBSPs were tried first but
+            # render narrower than bold letters, which caused labels with more
+            # bold chars (COMMIT, AUTHOR) to visibly drift right relative to
+            # short-label rows (URL, PR).
             # NOTE: no apostrophes in these comments  the outer shell context
             # is a single-quoted jq expression and an apostrophe would close it.
-            def padlabel(k): "*" + k + "*" + (((12 - (k|length)) as $n | if $n > 0 then "\u00a0" * $n else "\u00a0" end));
+            def padlabel(k): "*" + k + "*" + (((12 - (k|length)) as $n | if $n > 0 then "\u2003" * $n else "\u2003" end));
             def row(k; v): padlabel(k) + v;
 
             ( if $is_success == "0" and $failed_step != "" then
