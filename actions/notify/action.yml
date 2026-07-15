@@ -179,13 +179,13 @@ runs:
             --arg url_display "$url_display" --arg url_full "$DEPLOYED_URL" '
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
             # `label` is a jq reserved keyword (label/break), so name this `padlabel`.
-            # Bold label + trailing NBSP ( ) padding for column alignment.
+            # Bold label + trailing NBSP (\u00a0) padding for column alignment.
             # Slack collapses runs of regular ASCII spaces in mrkdwn to a single
             # space, so plain-space padding is useless; NBSPs render individually
             # and preserve spacing. Slack's variable-width font still means
             # alignment is approximate (a bold letter is wider than a space
             # glyph), but the value column drift is small and consistent.
-            def padlabel(k): "*" + k + "*" + (((12 - (k|length)) as $n | if $n > 0 then " " * $n else " " end));
+            def padlabel(k): "*" + k + "*" + (((12 - (k|length)) as $n | if $n > 0 then "\u00a0" * $n else "\u00a0" end));
             def row(k; v): padlabel(k) + v;
 
             ( if $is_success == "0" and $failed_step != "" then
