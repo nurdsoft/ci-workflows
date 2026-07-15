@@ -158,7 +158,9 @@ runs:
           # Slack's section.fields is a 2-col grid that wraps values past ~45
           # chars per column; long commit subjects and PR refs wrap ugly there.
           # A single mrkdwn block spans the whole card width instead.
-          header_lines="$(jq -n \
+          # `-r` is required: without it jq emits a JSON-encoded string with a
+          # literal `\n` two-char sequence, which Slack renders verbatim.
+          header_lines="$(jq -n -r \
             --arg subject "$commit_subject" \
             --arg pr_label "$pr_label" --arg pr_url "$pr_url" '
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
