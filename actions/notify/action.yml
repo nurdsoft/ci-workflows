@@ -159,14 +159,15 @@ runs:
             --arg text "${icon} ${LABEL} ${version}  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" \
             '{ text: $text }')"
         else
-          # -- All fields share the same 2-col label/value grid for a single
-          # uniform block — same label column, same value-column start.
-          # Order (success): COMMIT, PR, AUTHOR, HASH, DURATION, DATE, URL
-          # Order (failure): FAILED AT, COMMIT, PR, AUTHOR, HASH, DURATION, DATE
-          # Trade-off: Slack section.fields wraps values past ~45 chars per
-          # column, so long commit subjects will span two lines. Uniformity
-          # is preferred over wrap-avoidance here.
-          fields_json="$(jq -n \
+          # -- Single full-width mrkdwn section with monospace-padded labels.
+          # Slack's section.fields is a 2-col grid ~50/50; the value column is
+          # only ~30 chars, which wrapped long commit subjects and PR refs.
+          # Wrapping each label in inline code (`) forces monospace, so we can
+          # right-pad to a fixed 9-char column ("FAILED AT" is the longest at
+          # 9). That preserves the aligned-column look while giving the value
+          # column the full card width — long values no longer wrap.
+          # `-r` is required so the joined newlines survive raw to the outer jq.
+          rows_text="$(jq -n -r \
             --arg is_success "$is_success" \
             --arg failed_step "$failed_step" \
             --arg subject "$commit_subject" \
@@ -176,44 +177,39 @@ runs:
             --arg duration "$duration" \
             --arg built "$built_utc" \
             --arg url_display "$url_display" --arg url_full "$DEPLOYED_URL" '
-            def mrk(t): { type: "mrkdwn", text: t };
-            def row(k; v): [ mrk("*" + k + "*"), mrk(v) ];
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+            def label(k): "`" + k + (((9 - (k|length)) as $n | if $n > 0 then " " * $n else "" end)) + "`";
+            def row(k; v): label(k) + " " + v;
 
             ( if $is_success == "0" and $failed_step != "" then
-                row("FAILED AT"; ($failed_step|esc))
+                [ row("FAILED AT"; ($failed_step|esc)) ]
               else [] end )
-            + ( if $subject != "" then row("COMMIT"; ($subject|esc)) else [] end )
+            + ( if $subject != "" then [ row("COMMIT"; ($subject|esc)) ] else [] end )
             + ( if $pr_label != "" then
-                  row("PR"; (if $pr_url != "" then "<" + $pr_url + "|" + $pr_label + ">" else $pr_label end))
+                  [ row("PR"; (if $pr_url != "" then "<" + $pr_url + "|" + $pr_label + ">" else $pr_label end)) ]
                 else [] end )
-            + row("AUTHOR"; ($author|esc))
-            + row("HASH"; (if $commit_url != "" then "<" + $commit_url + "|`" + $short_sha + "`>" else "`" + $short_sha + "`" end))
-            + ( if $duration != "" then row("DURATION"; $duration) else [] end )
-            + row("DATE"; $built + " UTC")
+            + [ row("AUTHOR"; ($author|esc)) ]
+            + [ row("HASH"; (if $commit_url != "" then "<" + $commit_url + "|`" + $short_sha + "`>" else "`" + $short_sha + "`" end)) ]
+            + ( if $duration != "" then [ row("DURATION"; $duration) ] else [] end )
+            + [ row("DATE"; ($built + " UTC")) ]
             + ( if $is_success == "1" and $url_display != "" then
-                  row("URL"; "<" + $url_full + "|" + $url_display + ">")
+                  [ row("URL"; "<" + $url_full + "|" + $url_display + ">") ]
                 else [] end )
+            | join("\n")
           ')"
 
-          # Split fields into chunks of at most 10 per section (Block Kit limit).
           # Header emoji conveys status; no separate context/subtitle block.
           payload="$(jq -n \
             --arg icon "$icon" --arg label "$LABEL" --arg version "$version" \
             --arg runurl "$RUN_URL" \
-            --argjson fields "$fields_json" '
-            def chunk10:
-              . as $f
-              | [ range(0; ($f|length); 10) as $i | { type:"section", fields: $f[$i:$i+10] } ];
-
+            --arg rows_text "$rows_text" '
             { blocks:
-              ( [ { type:"header", text:{ type:"plain_text", text:($icon + " " + $label + " " + $version), emoji:true } } ]
-                + ($fields | chunk10)
-                + [ { type:"actions", elements:[
-                      { type:"button",
-                        text:{ type:"plain_text", text:"View run" },
-                        url: $runurl } ] } ]
-              )
+              [ { type:"header", text:{ type:"plain_text", text:($icon + " " + $label + " " + $version), emoji:true } },
+                { type:"section", text:{ type:"mrkdwn", text: $rows_text } },
+                { type:"actions", elements:[
+                    { type:"button",
+                      text:{ type:"plain_text", text:"View run" },
+                      url: $runurl } ] } ]
             }')"
         fi
 
