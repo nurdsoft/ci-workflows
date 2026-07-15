@@ -1,0 +1,183 @@
+name: Empty PR-description guard
+
+# Reusable merge-time gate. On a push to a protected branch, find the PR behind
+# HEAD and, if it merged with an empty (or whitespace-only) description, revert
+# the merge, edit the PR to explain, alert Slack, and emit block=true so the
+# caller can stand its release/build/deploy jobs down (we don't ship code we're
+# reverting). This is the merge-time backstop for enforcing PR descriptions.
+#
+# The caller decides *when* this runs (its own `if:`, e.g. only on dev pushes)
+# and grants the token scopes; this workflow operates on whatever branch the
+# push targeted (github.ref_name) and resolves the PR from github.sha.
+#
+# What gets reverted depends on how the PR landed:
+#   • merge commit (>=2 parents) → `git revert -m 1` undoes the whole PR.
+#   • squash (1 commit) / rebase (N commits) → revert every commit this push
+#     introduced (`before..HEAD`), so a multi-commit rebase is fully undone.
+#
+# Fail behaviour:
+#   • PR-fetch API error → fail SAFE: skip (block=false), never false-revert.
+#   • revert push rejected / conflicts → block stays true, Slack says "revert by
+#     hand", and the caller (which gates on this workflow's result) stands down.
+#
+# Secrets: the Slack webhook is typically an *environment* secret, and a job
+# that calls a reusable workflow can't declare an environment. So this workflow
+# declares the environment (from `environment` input) and the caller passes
+# `secrets: inherit`; SLACK_WEBHOOK_URL then resolves from the caller's env.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: >-
+          Caller environment to run under; its secrets must expose
+          SLACK_WEBHOOK_URL. Required because the webhook is an environment
+          secret and a reusable-workflow caller job cannot declare an
+          environment itself.
+        required: true
+        type: string
+      label:
+        description: Short name shown in the Slack alert header (e.g. "Backend", "Web").
+        required: false
+        type: string
+        default: Service
+    outputs:
+      block:
+        description: "'true' when the merge was reverted and the caller's release must stand down."
+        value: ${{ jobs.guard.outputs.block }}
+
+permissions: {}
+
+jobs:
+  guard:
+    name: Gate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write        # push the revert commit
+      pull-requests: write   # edit the reverted PR description
+    outputs:
+      block: ${{ steps.check.outputs.block }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0   # full history so the merge commit is revertable
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Revert empty-description merge
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+          BASE_REF: ${{ github.ref_name }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          block=false
+
+          # Find the PR that introduced this commit. Empty for a direct push
+          # (no PR) — that's branch-protection's job, not ours.
+          pr_json="$(gh api "repos/$REPO/commits/$SHA/pulls" \
+              -H "Accept: application/vnd.github+json" 2>/dev/null || echo '[]')"
+          pr_number="$(jq -r 'map(select(.merged_at != null)) | (.[0].number // empty)' <<<"$pr_json")"
+
+          if [ -z "$pr_number" ]; then
+            echo "No merged PR associated with $SHA (direct push?); nothing to enforce."
+          else
+            # Fetch the PR body in one call. Fail SAFE: if the API call fails
+            # (rate limit, network), do NOT treat it as an empty description —
+            # that would revert a legitimate merge. Skip the guard and proceed.
+            pr="$(gh pr view "$pr_number" --repo "$REPO" --json body 2>/dev/null)" || {
+              echo "::warning::Could not fetch PR #$pr_number; skipping description guard for $SHA."
+              echo "block=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+            pr_body="$(jq -r '.body // ""' <<<"$pr")"
+
+            if [ -n "$(printf '%s' "$pr_body" | tr -d '[:space:]')" ]; then
+              echo "PR #$pr_number has a description; proceeding."
+            else
+              echo "PR #$pr_number merged with an empty description — reverting $SHA."
+              block=true
+              # Persist block early so a later failure in this branch can't fail
+              # open and let the reverted code ship (last write to the file wins).
+              echo "block=true" >> "$GITHUB_OUTPUT"
+
+              # merge commit (>=3 tokens: self + 2 parents) → revert via -m 1;
+              # squash/rebase → revert the whole before..HEAD range.
+              parents="$(git rev-list --parents -n 1 "$SHA" | wc -w)"
+              if [ "$parents" -ge 3 ]; then
+                revert_target="$SHA"; margs="-m 1"
+              else
+                revert_target="${BEFORE}..${SHA}"; margs=""
+              fi
+
+              outcome=""
+              # shellcheck disable=SC2086
+              if git revert --no-edit $margs $revert_target; then
+                if git push origin "HEAD:$BASE_REF"; then
+                  outcome="reverted"
+                  rsha="$(git rev-parse HEAD)"
+                  # Write the revert notice into the PR description itself (not a
+                  # comment) so it's visible at the top of the PR. The body was
+                  # empty (that's what tripped the guard), so setting it is safe —
+                  # nothing to preserve. Editing a merged PR's body is allowed.
+                  gh pr edit "$pr_number" --repo "$REPO" \
+                    --body "> ⚠️ **Auto-reverted on \`$BASE_REF\` (${rsha:0:7})** — this PR merged with an empty description, so the release was stood down and the merge reverted. Add a summary of *what* changed and *why*, then open a new PR." || true
+                  echo "::warning::Reverted $SHA on $BASE_REF as ${rsha:0:7}; skipping this release."
+                else
+                  outcome="push_failed"
+                  echo "::error::Revert commit created but push to $BASE_REF was rejected (branch protection?); manual revert needed."
+                fi
+              else
+                git revert --abort || true
+                outcome="conflict"
+                echo "::error::Auto-revert of $SHA conflicts with later commits; manual revert needed."
+              fi
+
+              # Per-outcome alert content. The Slack card itself is rendered by
+              # the notify step below (the shared notify action), which resolves
+              # the PR from github.sha for the title/link/author. We only supply
+              # the header, color bar, and Status text here.
+              case "$outcome" in
+                reverted)    color="#F9A825"; header=":leftwards_arrow_with_hook: ${LABEL} — merge reverted (empty description)"; reason="Merge reverted on \`${BASE_REF}\` (${rsha:0:7}); release skipped" ;;
+                push_failed) color="#D32F2F"; header=":rotating_light: ${LABEL} — revert blocked (empty description)"; reason="Revert push to \`${BASE_REF}\` rejected (branch protection); revert by hand" ;;
+                conflict)    color="#D32F2F"; header=":rotating_light: ${LABEL} — MANUAL revert needed (empty description)"; reason="Auto-revert conflicted on \`${BASE_REF}\`; revert by hand" ;;
+                *)           color="#D32F2F"; header=":rotating_light: ${LABEL} — empty-description merge"; reason="Revert outcome unknown; check the run" ;;
+              esac
+
+              {
+                echo "outcome=$outcome"
+                echo "color=$color"
+                echo "header=$header"
+                echo "reason=$reason"
+              } >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+          echo "block=$block" >> "$GITHUB_OUTPUT"
+
+      # Render the revert alert as a Slack card via the shared notify action —
+      # same card shape as the deploy announce, so both read consistently. Fires
+      # only when the guard acted (outcome set). target-sha/target-repo default
+      # to the caller's github.sha/github.repository, so notify resolves the
+      # empty-description PR for the card's title/link/author.
+      #
+      # Pinned to feat/empty-pr-guard for now (same branch as this workflow);
+      # bump to @v3 when this releases.
+      - name: Announce revert on Slack
+        if: steps.check.outputs.outcome != ''
+        uses: nurdsoft/ci-workflows/actions/notify@feat/empty-pr-guard
+        with:
+          result: failure
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          label: ${{ inputs.label }}
+          header: ${{ steps.check.outputs.header }}
+          color: ${{ steps.check.outputs.color }}
+          status: ${{ steps.check.outputs.reason }}
