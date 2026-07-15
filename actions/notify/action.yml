@@ -182,9 +182,11 @@ runs:
             # Bold label + trailing NBSP (\u00a0) padding for column alignment.
             # Slack collapses runs of regular ASCII spaces in mrkdwn to a single
             # space, so plain-space padding is useless; NBSPs render individually
-            # and preserve spacing. Slack's variable-width font still means
-            # alignment is approximate (a bold letter is wider than a space
+            # and preserve spacing. The Slack renderer uses a variable-width font
+            # so alignment is approximate (a bold letter is wider than a space
             # glyph), but the value column drift is small and consistent.
+            # NOTE: no apostrophes in these comments  the outer shell context
+            # is a single-quoted jq expression and an apostrophe would close it.
             def padlabel(k): "*" + k + "*" + (((12 - (k|length)) as $n | if $n > 0 then "\u00a0" * $n else "\u00a0" end));
             def row(k; v): padlabel(k) + v;
 
