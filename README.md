@@ -294,6 +294,23 @@ Slack webhook (typically an environment-scoped secret) resolves inline, so no
 separate output-threaded alert job is needed. It emits the alert content as
 step outputs; feed those directly into a `notify` step in the same job.
 
+### Why a composite action rather than a reusable workflow?
+
+The guard needs to fire before any release/build/deploy job and, when it fires,
+stand those jobs down. Both packaging choices can do that; the composite ships
+with less caller boilerplate:
+
+- **One job, not two.** A reusable-workflow guard forces the caller to add a
+  second `*-notify` job so the environment-scoped Slack webhook resolves. A
+  composite runs inside the caller's job, so the guard and its alert share the
+  same `environment:` block.
+- **Step outputs, not cross-job outputs.** The alert step reads
+  `steps.<id>.outputs.header` directly; no `needs.<x>.outputs.*` plumbing.
+- **One node in the pipeline graph, not two.** The visual dependency tree
+  stays compact.
+
+Same underlying revert/edit script; only the packaging differs.
+
 | Input | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `label` | string | no | `Service` | Short name shown in the alert header the caller renders (e.g. `Backend`, `Web`). |
