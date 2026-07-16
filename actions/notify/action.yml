@@ -198,7 +198,7 @@ runs:
               # under the analytical formula their rendered width overshoots
               # the reference column formed by the other labels. Drop 2 NBSPs
               # from those three to pull their values back into the same X.
-              | (if k == "COMMIT" or k == "AUTHOR" or k == "DURATION" then 2 else 0 end) as $shave
+              | (if k == "COMMIT" or k == "AUTHOR" or k == "DURATION" then 2 elif k == "PR" then -1 else 0 end) as $shave
               | "*" + k + "*"
                 + "\u2003" * (if 12 - $L > 0 then 12 - $L else 0 end)
                 + "\u00a0" * ($L - $shave);
