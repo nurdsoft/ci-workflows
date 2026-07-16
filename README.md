@@ -22,6 +22,7 @@ behind a runner contract you control (or pass inline via `run`).
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
 | `actions/notify` | Action | Post the pipeline result as a rich Slack card |
+| `actions/empty-pr-guard` | Action | Merge-time gate — revert a merge whose PR had an empty description and return `block` (+ alert content) so the caller stands its release down |
 
 ## Design
 
@@ -274,6 +275,79 @@ version:
     changelog-on-rc: true
 ```
 
+## empty-pr-guard — inputs & outputs
+
+Merge-time gate that enforces non-empty PR descriptions. Call it as the **first
+step** of a job at the top of your pipeline, gated to the branch you protect.
+On a push whose merge commit traces to a PR with an empty (or whitespace-only)
+body, it reverts the merge on that branch, edits the PR to explain, and returns
+`block=true`; downstream jobs read `needs.<guard-job>.outputs.block != 'true'`
+and stand down. A PR-fetch API error fails **safe** (skips, never
+false-reverts); a rejected push or a revert conflict keeps `block=true` and
+reports "revert by hand".
+
+It reverts a merge commit via `git revert -m 1` and a squash/rebase merge via
+the `before..HEAD` range, so all three GitHub merge styles are fully undone.
+
+Because it's a composite action, the alert is posted in the **same job**: the
+Slack webhook (typically an environment-scoped secret) resolves inline, so no
+separate output-threaded alert job is needed. It emits the alert content as
+step outputs; feed those directly into a `notify` step in the same job.
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `label` | string | no | `Service` | Short name shown in the alert header the caller renders (e.g. `Backend`, `Web`). |
+| `github-token` | string | no | `${{ github.token }}` | Token used to read the PR, push the revert, and edit the PR body. Override with a GitHub-App token for cross-org. |
+
+| Output | Description |
+|--------|-------------|
+| `block` | `'true'` when the merge was reverted and the caller's release must stand down. |
+| `outcome` | Empty when nothing was done; else `reverted` \| `push_failed` \| `conflict`. Gate the notify step on `outcome != ''`. |
+| `header` | Alert header line for the caller's Slack card. |
+| `color` | Alert colour bar (hex) for the caller's Slack card. |
+| `reason` | Alert status line for the caller's Slack card. |
+
+Grant `contents: write` + `pull-requests: write` on the calling job. To surface
+the alert on Slack, add a follow-up step in the same job (the environment-scoped
+webhook resolves directly there) that renders the card via `notify` from the
+guard's outputs. Expose `block` as a job-level output so downstream jobs can
+gate on it.
+
+```yaml
+jobs:
+  guard:
+    if: github.event_name == 'push' && github.ref_name == 'dev'
+    runs-on: ubuntu-latest
+    environment: dev                              # so ${{ secrets.SLACK_WEBHOOK_URL }} resolves
+    permissions: { contents: write, pull-requests: write }
+    outputs:
+      block: ${{ steps.g.outputs.block }}
+    steps:
+      - id: g
+        uses: nurdsoft/ci-workflows/actions/empty-pr-guard@v3
+        with:
+          label: Backend
+
+      # Alert on Slack when the guard acted; on a clean merge this step skips.
+      # Best-effort — a missing/failed webhook never fails the job.
+      - if: ${{ steps.g.outputs.outcome != '' }}
+        uses: nurdsoft/ci-workflows/actions/notify@v3
+        with:
+          result: failure
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          label: Backend
+          header: ${{ steps.g.outputs.header }}
+          color:  ${{ steps.g.outputs.color }}
+          status: ${{ steps.g.outputs.reason }}
+
+  release:
+    needs: [guard]
+    # !cancelled() so a skipped guard (e.g. non-dev push) doesn't skip release;
+    # block=true stands it down; a guard that *failed* fails closed.
+    if: ${{ !cancelled() && needs.guard.result != 'failure' && needs.guard.outputs.block != 'true' }}
+    # ...
+```
+
 ## notify — inputs
 
 Posts a rich Slack card for a pipeline result: a green/red header
@@ -287,12 +361,22 @@ local-timezone message timestamp.
 Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
 post never fails the pipeline.
 
+The `header`, `color`, and `status` inputs turn the same card into a general
+**alert** (e.g. a revert or guard notice) instead of a deploy result: supply a
+custom title and color bar, and the first field becomes **Status** instead of
+**Version**. The PR/commit resolution, body, and context line are unchanged, so
+the card still shows the PR (or commit) that `target-sha` traces to. Omit all
+three and the card is exactly the deploy-result card above.
+
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `result` | yes | — | `success` / `failure` — e.g. a deploy job's `result`. Anything other than `success` renders as failed. |
 | `webhook-url` | no | `''` | Slack incoming webhook URL. Empty makes the action a no-op. |
 | `label` | no | `Deployment` | Short label for the card header (app / component name). |
 | `version` | no | `''` | Version string shown in the Version field (`n/a` if empty). |
+| `header` | no | `''` | Full header line, verbatim, overriding the default `<emoji> <label> — <status>`. May contain Slack emoji shortcodes. |
+| `color` | no | `''` | Attachment bar color (hex) overriding the result-derived green/red. |
+| `status` | no | `''` | When set, the first field renders as **Status** with this text in place of the **Version** field. |
 | `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
 | `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
 | `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
