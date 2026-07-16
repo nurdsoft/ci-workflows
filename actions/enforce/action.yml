@@ -1,4 +1,4 @@
-name: Empty PR-description guard
+name: Enforce PR description
 description: >-
   Merge-time gate. On a push, resolves the PR behind github.sha and, if its
   body is empty/whitespace-only, reverts the merge, edits the PR to explain,

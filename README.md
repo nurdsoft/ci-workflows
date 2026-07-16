@@ -22,7 +22,7 @@ behind a runner contract you control (or pass inline via `run`).
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
 | `actions/notify` | Action | Post the pipeline result as a rich Slack card |
-| `actions/guard` | Action | Merge-time gate — revert a merge whose PR had an empty description and return `block` (+ alert content) so the caller stands its release down |
+| `actions/enforce` | Action | Merge-time gate — revert a merge whose PR had an empty description and return `block` (+ alert content) so the caller stands its release down |
 
 ## Design
 
@@ -275,7 +275,7 @@ version:
     changelog-on-rc: true
 ```
 
-## guard — inputs & outputs
+## enforce — inputs & outputs
 
 Merge-time gate that enforces non-empty PR descriptions. Call it as the **first
 step** of a job at the top of your pipeline, gated to the branch you protect.
@@ -324,7 +324,7 @@ jobs:
       block: ${{ steps.g.outputs.block }}
     steps:
       - id: g
-        uses: nurdsoft/ci-workflows/actions/guard@v3
+        uses: nurdsoft/ci-workflows/actions/enforce@v3
         with:
           label: Backend
 
