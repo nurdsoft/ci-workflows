@@ -212,7 +212,7 @@ runs:
             + ( if $is_success == "1" and $url_display != "" then
                   [ row("URL"; "<" + $url_full + "|" + $url_display + ">") ]
                 else [] end )
-            | join("\n")
+            | join("\n\n")
           ')"
 
           # Header emoji conveys status; no separate context/subtitle block.
