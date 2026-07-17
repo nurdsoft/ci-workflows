@@ -22,6 +22,7 @@ behind a runner contract you control (or pass inline via `run`).
 | `actions/plan`   | Action | Preview an infrastructure change |
 | `actions/apply`  | Action | Apply an infrastructure change |
 | `actions/notify` | Action | Post the pipeline result as a rich Slack card |
+| `actions/enforce` | Action | Merge-time gate — revert a merge whose PR had an empty description and return `block` (+ alert content) so the caller stands its release down |
 
 ## Design
 
@@ -291,16 +292,28 @@ GitHub Actions API — no caller wiring required. The caller must grant
 `pull-requests: read` used for the PR/commit lookup).
 
 Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
-post never fails the pipeline. If the run/jobs API is unreachable, the duration
-or failed-step rows are silently omitted.
+post never fails the pipeline. If the run/jobs API is unreachable (typically:
+the notify job forgot to grant `actions: read`), the action emits a workflow
+`::warning::` and the duration/failed-step rows are omitted from the card.
+
+The `header`, `color`, and `status` inputs switch the card into **alert mode**:
+the redesigned deploy card is replaced with an attachments-wrapper alert card
+whose title, color bar, and first field (`Status` instead of `Version`) come
+from those inputs. Used by `actions/enforce` and other non-deploy callers. The
+PR/commit resolution is unchanged, so the alert still shows the PR (or commit)
+`target-sha` traces to. Omit all three and the card is the standard deploy
+card above.
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `result` | yes | — | `success` / `failure` — e.g. a deploy job's `result`. Anything other than `success` renders as failed. |
 | `webhook-url` | no | `''` | Slack incoming webhook URL. Empty makes the action a no-op. |
-| `label` | no | `Deployment` | Short label rendered next to the version in the header. Prefer a bare component name (`"Commerce Backend"`) — the Slack channel already implies environment. |
+| `label` | no | `Deployment` | Short label rendered next to the version in the header. Prefer a bare component name (`"Backend"`) — the Slack channel already implies environment. |
 | `version` | no | `''` | Version string shown next to the label (`n/a` if empty). |
 | `deployed-url` | no | `''` | Fully-qualified URL of the deployed app; shown only on success. The card strips protocol and trailing slash for display, and links back to the full URL. Caller resolves per-environment. |
+| `header` | no | `''` | Full alert-card title, verbatim. Presence switches the card into alert mode (replaces the deploy card with an attachments-wrapper alert card). May contain Slack emoji shortcodes. |
+| `color` | no | `''` | Alert-card bar color (hex, e.g. `#F9A825`). Only takes effect in alert mode. Overrides the result-derived green/red. |
+| `status` | no | `''` | When set, the alert card's first field renders as **Status** with this text in place of the **Version** field. Only takes effect in alert mode. |
 | `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
 | `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit, the workflow run, and (on failure) the run's jobs. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
 | `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
@@ -318,7 +331,7 @@ Example — same-repo deploy (token/target default to this repo):
       pull-requests: read
       actions: read
     steps:
-      - uses: nurdsoft/ci-workflows/actions/notify@v3
+      - uses: nurdsoft/ci-workflows/actions/notify@v4
         with:
           result: ${{ needs.deploy.result }}
           label: "Backend"
@@ -337,7 +350,7 @@ Example — cross-org deploy (card describes a PR/commit in another repo):
           private-key: ${{ secrets.READ_APP_KEY }}
           owner: other-org
           repositories: other-repo
-      - uses: nurdsoft/ci-workflows/actions/notify@v3
+      - uses: nurdsoft/ci-workflows/actions/notify@v4
         with:
           result: ${{ needs.deploy.result }}
           label: "Web"
@@ -347,6 +360,96 @@ Example — cross-org deploy (card describes a PR/commit in another repo):
           github-token: ${{ steps.app-token.outputs.token }}
           target-repo: other-org/other-repo
           target-sha: ${{ needs.build.outputs.app_sha }}
+```
+
+## enforce — inputs & outputs
+
+Merge-time gate that enforces non-empty PR descriptions. Call it as the **first
+step** of a job at the top of your pipeline, gated to the branch you protect.
+On a push whose merge commit traces to a PR with an empty (or whitespace-only)
+body, it reverts the merge on that branch, edits the PR to explain, and returns
+`block=true`; downstream jobs read `needs.<guard-job>.outputs.block != 'true'`
+and stand down. A PR-fetch API error fails **safe** (skips, never
+false-reverts); a rejected push or a revert conflict keeps `block=true` and
+reports "revert by hand".
+
+It reverts a merge commit via `git revert -m 1` and a squash/rebase merge via
+the `before..HEAD` range, so all three GitHub merge styles are fully undone.
+
+Because it's a composite action, the alert is posted in the **same job**: the
+Slack webhook (typically an environment-scoped secret) resolves inline, so no
+separate output-threaded alert job is needed. It emits the alert content as
+step outputs; feed those directly into a `notify` step in the same job.
+
+### Why a composite action rather than a reusable workflow?
+
+The guard needs to fire before any release/build/deploy job and, when it fires,
+stand those jobs down. Both packaging choices can do that; the composite ships
+with less caller boilerplate:
+
+- **One job, not two.** A reusable-workflow guard forces the caller to add a
+  second `*-notify` job so the environment-scoped Slack webhook resolves. A
+  composite runs inside the caller's job, so the guard and its alert share the
+  same `environment:` block.
+- **Step outputs, not cross-job outputs.** The alert step reads
+  `steps.<id>.outputs.header` directly; no `needs.<x>.outputs.*` plumbing.
+- **One node in the pipeline graph, not two.** The visual dependency tree
+  stays compact.
+
+Same underlying revert/edit script; only the packaging differs.
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `label` | string | no | `Service` | Short name shown in the alert header the caller renders (e.g. `Backend`, `Web`). |
+| `github-token` | string | no | `${{ github.token }}` | Token used to read the PR, push the revert, and edit the PR body. Override with a GitHub-App token for cross-org. |
+
+| Output | Description |
+|--------|-------------|
+| `block` | `'true'` when the merge was reverted and the caller's release must stand down. |
+| `outcome` | Empty when nothing was done; else `reverted` \| `push_failed` \| `conflict`. Gate the notify step on `outcome != ''`. |
+| `header` | Alert header line for the caller's Slack card. |
+| `color` | Alert colour bar (hex) for the caller's Slack card. |
+| `reason` | Alert status line for the caller's Slack card. |
+
+Grant `contents: write` + `pull-requests: write` on the calling job. To surface
+the alert on Slack, add a follow-up step in the same job (the environment-scoped
+webhook resolves directly there) that renders the card via `notify` from the
+guard's outputs. Expose `block` as a job-level output so downstream jobs can
+gate on it.
+
+```yaml
+jobs:
+  guard:
+    if: github.event_name == 'push' && github.ref_name == 'dev'
+    runs-on: ubuntu-latest
+    environment: dev                              # so ${{ secrets.SLACK_WEBHOOK_URL }} resolves
+    permissions: { contents: write, pull-requests: write }
+    outputs:
+      block: ${{ steps.g.outputs.block }}
+    steps:
+      - id: g
+        uses: nurdsoft/ci-workflows/actions/enforce@v4
+        with:
+          label: Backend
+
+      # Alert on Slack when the guard acted; on a clean merge this step skips.
+      # Best-effort — a missing/failed webhook never fails the job.
+      - if: ${{ steps.g.outputs.outcome != '' }}
+        uses: nurdsoft/ci-workflows/actions/notify@v4
+        with:
+          result: failure
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          label: Backend
+          header: ${{ steps.g.outputs.header }}
+          color:  ${{ steps.g.outputs.color }}
+          status: ${{ steps.g.outputs.reason }}
+
+  release:
+    needs: [guard]
+    # !cancelled() so a skipped guard (e.g. non-dev push) doesn't skip release;
+    # block=true stands it down; a guard that *failed* fails closed.
+    if: ${{ !cancelled() && needs.guard.result != 'failure' && needs.guard.outputs.block != 'true' }}
+    # ...
 ```
 
 ## Runner contract

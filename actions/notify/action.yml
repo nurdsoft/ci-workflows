@@ -18,7 +18,7 @@ inputs:
   label:
     description: >-
       Short label for the message header (app / component name). Rendered
-      alongside `version`. Prefer a bare name ("Commerce Backend") — the Slack
+      alongside `version`. Prefer a bare name ("Backend") — the Slack
       channel already implies the environment.
     required: false
     default: Deployment
@@ -31,6 +31,29 @@ inputs:
       Fully-qualified URL of the deployed app (shown only on success). The card
       strips protocol and trailing slash for display, and links back to the full
       URL. Caller resolves per-environment.
+    required: false
+    default: ""
+  header:
+    description: >-
+      Full header line, verbatim. When set, switches the card into alert mode:
+      the redesigned deploy card is replaced with an attachments-wrapper alert
+      card whose title is this string and whose bar color is `color`. Used by
+      `actions/enforce` and other non-deploy callers. May contain Slack emoji
+      shortcodes. Setting any of `header` / `color` / `status` enables alert
+      mode; leave all three empty for the standard deploy card.
+    required: false
+    default: ""
+  color:
+    description: >-
+      Attachment bar color (hex, e.g. `"#F9A825"`). Only takes effect in alert
+      mode (any of `header` / `color` / `status` set). Overrides the
+      result-derived green/red.
+    required: false
+    default: ""
+  status:
+    description: >-
+      When set, the alert card's first field renders as `*Status*\n<status>` in
+      place of `*Version*\n<version>`. Only takes effect in alert mode.
     required: false
     default: ""
   channel:
@@ -69,6 +92,9 @@ runs:
         LABEL: ${{ inputs.label }}
         VERSION: ${{ inputs.version }}
         DEPLOYED_URL: ${{ inputs.deployed-url }}
+        HEADER_IN: ${{ inputs.header }}
+        COLOR_IN: ${{ inputs.color }}
+        STATUS_IN: ${{ inputs.status }}
         WEBHOOK: ${{ inputs.webhook-url }}
         TARGET_REPO: ${{ inputs.target-repo }}
         TARGET_SHA: ${{ inputs.target-sha }}
@@ -94,11 +120,91 @@ runs:
         short_sha="${TARGET_SHA:0:7}"
         built_utc="$(date -u +%Y-%m-%d)"
 
+        # -- Alert mode: header/color/status swap the redesigned deploy card
+        # for an attachments-wrapper alert card. Byte-identical to the pre-v4
+        # notify card, so the actions/enforce alert path (#20) survives v4.
+        # Skips the run/jobs fetch entirely — DURATION and FAILED AT are
+        # deploy-only.
+        if [ -n "${HEADER_IN:-}" ] || [ -n "${COLOR_IN:-}" ] || [ -n "${STATUS_IN:-}" ]; then
+          a_emoji=":x:"; a_color="#D32F2F"; a_status="failed"
+          if [ "${RESULT:-}" = "success" ]; then
+            a_emoji=":white_check_mark:"; a_color="#2E7D32"; a_status="succeeded"
+          fi
+          header="${HEADER_IN:-${a_emoji} ${LABEL} — ${a_status}}"
+          [ -n "${COLOR_IN:-}" ] && a_color="$COLOR_IN"
+          if [ -n "${STATUS_IN:-}" ]; then
+            f1label="Status"; f1value="$STATUS_IN"
+          else
+            f1label="Version"; f1value="$version"
+          fi
+
+          pr_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}/pulls" -H "Accept: application/vnd.github+json" 2>/dev/null || echo '[]')"
+          sel="$(jq -c 'if (type=="array" and length>0) then ([.[]|select(.merged_at!=null)][0] // .[0]) else {} end' <<<"$pr_json")"
+          pr_num="$(jq -r '.number // empty' <<<"$sel")"
+
+          if [ -n "$pr_num" ]; then
+            pr_title="$(jq -r '.title // ""' <<<"$sel")"
+            pr_url="$(jq -r '.html_url // ""' <<<"$sel")"
+            pr_user="$(jq -r '.user.login // "unknown"' <<<"$sel")"
+            payload="$(jq -n \
+              --arg color "$a_color" --arg header "$header" \
+              --arg f1label "$f1label" --arg f1value "$f1value" \
+              --arg prlabel "${TARGET_REPO}#${pr_num}" --arg title "$pr_title" \
+              --arg user "$pr_user" --arg runurl "$RUN_URL" --arg prurl "$pr_url" \
+              --arg built "$built_utc" '
+              def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+              { attachments: [{ color: $color, blocks: [
+                  { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
+                  { type:"section", fields:[
+                      { type:"mrkdwn", text:("*" + $f1label + "*\n" + $f1value) },
+                      { type:"mrkdwn", text:("*PR*\n" + (if $prurl != "" then "<" + $prurl + "|" + $prlabel + ">" else $prlabel end)) } ]},
+                  { type:"section", text:{ type:"mrkdwn", text:("*" + ($title|esc) + "*") } },
+                  { type:"context", elements:[
+                      { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   📅 " + $built + " UTC   ·   🔗 <" + $runurl + "|view run>") } ]}
+              ]}]}')"
+          else
+            commit_json="$(gh api "repos/${TARGET_REPO}/commits/${TARGET_SHA}" 2>/dev/null || echo '{}')"
+            c_subject="$(jq -r '.commit.message // "" | split("\n")[0] // ""' <<<"$commit_json")"
+            c_author="$(jq -r '.commit.author.name // .author.login // "unknown"' <<<"$commit_json")"
+            c_url="$(jq -r '.html_url // ""' <<<"$commit_json")"
+            if [ -n "$c_subject" ]; then
+              payload="$(jq -n \
+                --arg color "$a_color" --arg header "$header" \
+                --arg f1label "$f1label" --arg f1value "$f1value" \
+                --arg short "$short_sha" --arg cmurl "$c_url" \
+                --arg subject "$c_subject" --arg user "$c_author" --arg runurl "$RUN_URL" \
+                --arg built "$built_utc" '
+                def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+                { attachments: [{ color: $color, blocks: [
+                    { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
+                    { type:"section", fields:[
+                        { type:"mrkdwn", text:("*" + $f1label + "*\n" + $f1value) },
+                        { type:"mrkdwn", text:("*Commit*\n" + (if $cmurl != "" then "<" + $cmurl + "|" + $short + ">" else "`" + $short + "`" end)) } ]},
+                    { type:"section", text:{ type:"mrkdwn", text:("*" + ($subject|esc) + "*") } },
+                    { type:"context", elements:[
+                        { type:"mrkdwn", text:("👤 " + ($user|esc) + "   ·   📅 " + $built + " UTC   ·   🔗 <" + $runurl + "|view run>") } ]}
+                ]}]}')"
+            else
+              payload="$(jq -n --arg text "${a_emoji} ${LABEL}: ${a_status}  |  version \`${version}\`  |  📅 ${built_utc} UTC  |  <${RUN_URL}|view run>" '{ text: $text }')"
+            fi
+          fi
+
+          if curl -fsS -X POST -H 'Content-Type: application/json' --data "$payload" "$WEBHOOK" >/dev/null; then
+            echo "Slack notification sent."
+          else
+            echo "Slack notification failed (ignored, best-effort)."
+          fi
+          exit 0
+        fi
+
         # -- Duration: pull run_started_at, compute elapsed vs now.
         # Falls back silently if the API call fails.
         duration=""
         run_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}" 2>/dev/null || echo '{}')"
         started_at="$(jq -r '.run_started_at // .created_at // empty' <<<"$run_json")"
+        if [ -z "$started_at" ]; then
+          echo "::warning::notify: /actions/runs/${RUN_ID} returned no run_started_at. Check that the notify job grants 'actions: read' — DURATION will not render."
+        fi
         if [ -n "$started_at" ]; then
           started_epoch="$(date -u -d "$started_at" +%s 2>/dev/null || echo '')"
           if [ -n "$started_epoch" ]; then
@@ -122,6 +228,9 @@ runs:
         failed_step=""
         if [ "$is_success" -eq 0 ]; then
           jobs_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}/jobs" 2>/dev/null || echo '{}')"
+          if [ "$(jq -r '(.jobs // []) | length' <<<"$jobs_json")" = "0" ]; then
+            echo "::warning::notify: /actions/runs/${RUN_ID}/jobs returned no jobs. Check that the notify job grants 'actions: read' — FAILED AT will not render."
+          fi
           failed_step="$(jq -r '[.jobs[]? | select(.conclusion == "failure")] | .[0].name // ""' <<<"$jobs_json")"
         fi
 
@@ -178,6 +287,12 @@ runs:
             --arg built "$built_utc" \
             --arg url_display "$url_display" --arg url_full "$DEPLOYED_URL" '
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+            # MAINTENANCE RISK. The padlabel scheme below is empirically tuned to
+            # Slacks Lato font at current rendering sizes  any Slack renderer
+            # change and column alignment drifts silently (visible only on
+            # screenshot review, not in any test signal). If durability matters
+            # more than fidelity, the safe fallback is a plain bold-then-value
+            # render: replace padlabel(k) + v with "*" + k + "*\n" + v.
             # `label` is a jq reserved keyword (label/break), so name this `padlabel`.
             # Two-space padding scheme for column alignment in Slack Lato:
             #   1. Em space (\u2003 = 1 em)     \u2014 pad to 12 chars total.
