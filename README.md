@@ -275,6 +275,93 @@ version:
     changelog-on-rc: true
 ```
 
+## notify — inputs
+
+Posts a rich Slack card for a pipeline result. Header shows the label + version
+with a green ✅ / red ❌ icon; a subtitle line reads `Deploy succeeded` or
+`Deploy failed`. The body is a single-column key/value grid ordered by
+importance: `COMMIT`, `PR`, `AUTHOR`, `HASH`, `DURATION`, `DATE`, plus `URL`
+(success only) or `FAILED AT` (failure only, promoted to the top row). A
+`View run` button links back to the CI run. With no PR it falls back to the
+**commit** (subject + clickable short SHA); with neither, a single-line text
+message.
+
+Duration and the failing step name are auto-fetched by the action via the
+GitHub Actions API — no caller wiring required. The caller must grant
+`actions: read` on the notify job (in addition to `contents: read` and
+`pull-requests: read` used for the PR/commit lookup).
+
+Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
+post never fails the pipeline. If the run/jobs API is unreachable (typically:
+the notify job forgot to grant `actions: read`), the action emits a workflow
+`::warning::` and the duration/failed-step rows are omitted from the card.
+
+The `header`, `color`, and `status` inputs switch the card into **alert mode**:
+the redesigned deploy card is replaced with an attachments-wrapper alert card
+whose title, color bar, and first field (`Status` instead of `Version`) come
+from those inputs. Used by `actions/enforce` and other non-deploy callers. The
+PR/commit resolution is unchanged, so the alert still shows the PR (or commit)
+`target-sha` traces to. Omit all three and the card is the standard deploy
+card above.
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `result` | yes | — | `success` / `failure` — e.g. a deploy job's `result`. Anything other than `success` renders as failed. |
+| `webhook-url` | no | `''` | Slack incoming webhook URL. Empty makes the action a no-op. |
+| `label` | no | `Deployment` | Short label rendered next to the version in the header. Prefer a bare component name (`"Backend"`) — the Slack channel already implies environment. |
+| `version` | no | `''` | Version string shown next to the label (`n/a` if empty). |
+| `deployed-url` | no | `''` | Fully-qualified URL of the deployed app; shown only on success. The card strips protocol and trailing slash for display, and links back to the full URL. Caller resolves per-environment. |
+| `header` | no | `''` | Full alert-card title, verbatim. Presence switches the card into alert mode (replaces the deploy card with an attachments-wrapper alert card). May contain Slack emoji shortcodes. |
+| `color` | no | `''` | Alert-card bar color (hex, e.g. `#F9A825`). Only takes effect in alert mode. Overrides the result-derived green/red. |
+| `status` | no | `''` | When set, the alert card's first field renders as **Status** with this text in place of the **Version** field. Only takes effect in alert mode. |
+| `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
+| `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit, the workflow run, and (on failure) the run's jobs. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
+| `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
+| `target-sha` | no | `${{ github.sha }}` | Exact built/deployed commit SHA used to resolve the PR/commit. |
+
+Example — same-repo deploy (token/target default to this repo):
+
+```yaml
+  announce:
+    needs: deploy
+    if: ${{ always() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+      - uses: nurdsoft/ci-workflows/actions/notify@v4
+        with:
+          result: ${{ needs.deploy.result }}
+          label: "Backend"
+          version: ${{ needs.deploy.outputs.version }}
+          deployed-url: ${{ github.ref_name == 'main' && 'https://app.example.com' || 'https://dev.example.com' }}
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+```
+
+Example — cross-org deploy (card describes a PR/commit in another repo):
+
+```yaml
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        id: app-token
+        with:
+          app-id: ${{ vars.READ_APP_ID }}
+          private-key: ${{ secrets.READ_APP_KEY }}
+          owner: other-org
+          repositories: other-repo
+      - uses: nurdsoft/ci-workflows/actions/notify@v4
+        with:
+          result: ${{ needs.deploy.result }}
+          label: "Web"
+          version: ${{ needs.build.outputs.app_version }}
+          deployed-url: https://app.other-org.com
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          github-token: ${{ steps.app-token.outputs.token }}
+          target-repo: other-org/other-repo
+          target-sha: ${{ needs.build.outputs.app_sha }}
+```
+
 ## enforce — inputs & outputs
 
 Merge-time gate that enforces non-empty PR descriptions. Call it as the **first
@@ -341,14 +428,14 @@ jobs:
       block: ${{ steps.g.outputs.block }}
     steps:
       - id: g
-        uses: nurdsoft/ci-workflows/actions/enforce@v3
+        uses: nurdsoft/ci-workflows/actions/enforce@v4
         with:
           label: Backend
 
       # Alert on Slack when the guard acted; on a clean merge this step skips.
       # Best-effort — a missing/failed webhook never fails the job.
       - if: ${{ steps.g.outputs.outcome != '' }}
-        uses: nurdsoft/ci-workflows/actions/notify@v3
+        uses: nurdsoft/ci-workflows/actions/notify@v4
         with:
           result: failure
           webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -363,78 +450,6 @@ jobs:
     # block=true stands it down; a guard that *failed* fails closed.
     if: ${{ !cancelled() && needs.guard.result != 'failure' && needs.guard.outputs.block != 'true' }}
     # ...
-```
-
-## notify — inputs
-
-Posts a rich Slack card for a pipeline result: a green/red header
-(`<label> — succeeded|failed`), a Version field, and the **PR** this deploy
-traces to (title + clickable `owner/repo#NN`). With no PR it falls back to the
-**commit** (subject + clickable short SHA), and with neither to a single-line
-text message. A context line shows the author, the UTC build date
-(`YYYY.MM.DD`), and a link to the run. The build date is stamped by the action
-so the deploy date reads unambiguously rather than being inferred from Slack's
-local-timezone message timestamp.
-Best-effort: an empty `webhook-url` is a no-op that still succeeds, and a failed
-post never fails the pipeline.
-
-The `header`, `color`, and `status` inputs turn the same card into a general
-**alert** (e.g. a revert or guard notice) instead of a deploy result: supply a
-custom title and color bar, and the first field becomes **Status** instead of
-**Version**. The PR/commit resolution, body, and context line are unchanged, so
-the card still shows the PR (or commit) that `target-sha` traces to. Omit all
-three and the card is exactly the deploy-result card above.
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `result` | yes | — | `success` / `failure` — e.g. a deploy job's `result`. Anything other than `success` renders as failed. |
-| `webhook-url` | no | `''` | Slack incoming webhook URL. Empty makes the action a no-op. |
-| `label` | no | `Deployment` | Short label for the card header (app / component name). |
-| `version` | no | `''` | Version string shown in the Version field (`n/a` if empty). |
-| `header` | no | `''` | Full header line, verbatim, overriding the default `<emoji> <label> — <status>`. May contain Slack emoji shortcodes. |
-| `color` | no | `''` | Attachment bar color (hex) overriding the result-derived green/red. |
-| `status` | no | `''` | When set, the first field renders as **Status** with this text in place of the **Version** field. |
-| `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
-| `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
-| `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
-| `target-sha` | no | `${{ github.sha }}` | Exact built/deployed commit SHA used to resolve the PR/commit. |
-
-Example — same-repo deploy (token/target default to this repo):
-
-```yaml
-  announce:
-    needs: deploy
-    if: ${{ always() && github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    permissions: { contents: read, pull-requests: read }
-    steps:
-      - uses: nurdsoft/ci-workflows/actions/notify@v3
-        with:
-          result: ${{ needs.deploy.result }}
-          label: "Backend (${{ github.ref_name == 'prod' && 'Prod' || 'Dev' }})"
-          version: ${{ needs.deploy.outputs.version }}
-          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
-```
-
-Example — cross-org deploy (card describes a PR/commit in another repo):
-
-```yaml
-      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
-        id: app-token
-        with:
-          app-id: ${{ vars.READ_APP_ID }}
-          private-key: ${{ secrets.READ_APP_KEY }}
-          owner: other-org
-          repositories: other-repo
-      - uses: nurdsoft/ci-workflows/actions/notify@v3
-        with:
-          result: ${{ needs.deploy.result }}
-          label: "Web (Prod)"
-          version: ${{ needs.build.outputs.app_version }}
-          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
-          github-token: ${{ steps.app-token.outputs.token }}
-          target-repo: other-org/other-repo
-          target-sha: ${{ needs.build.outputs.app_sha }}
 ```
 
 ## Runner contract
