@@ -23,6 +23,26 @@ inputs:
     description: Version string shown in the message.
     required: false
     default: ""
+  header:
+    description: >-
+      Full header line, verbatim. When set, overrides the default
+      "<emoji> <label> — <succeeded|failed>" header — for alert cards that need
+      a custom title (e.g. a revert notice). May contain Slack emoji shortcodes.
+    required: false
+    default: ""
+  color:
+    description: >-
+      Attachment bar color (hex, e.g. "#F9A825"). When set, overrides the
+      result-derived green/red — lets alert callers signal a state that isn't a
+      clean pass/fail.
+    required: false
+    default: ""
+  status:
+    description: >-
+      When set, the first card field renders as "*Status*\n<status>" in place of
+      "*Version*\n<version>". For alert cards where a version is meaningless.
+    required: false
+    default: ""
   channel:
     description: "Chat channel: slack (only slack implemented today)."
     required: false
@@ -58,6 +78,9 @@ runs:
         RESULT: ${{ inputs.result }}
         LABEL: ${{ inputs.label }}
         VERSION: ${{ inputs.version }}
+        HEADER_IN: ${{ inputs.header }}
+        COLOR_IN: ${{ inputs.color }}
+        STATUS_IN: ${{ inputs.status }}
         WEBHOOK: ${{ inputs.webhook-url }}
         TARGET_REPO: ${{ inputs.target-repo }}
         TARGET_SHA: ${{ inputs.target-sha }}
@@ -78,6 +101,18 @@ runs:
         version="${VERSION:-}"; [ -z "$version" ] && version="n/a"
         short_sha="${TARGET_SHA:0:7}"
 
+        # Card chrome. Alert callers can override the header line and color bar,
+        # and swap the first field from Version to Status. With none of these
+        # inputs set, the result-derived defaults reproduce the original card
+        # verbatim, so existing deploy callers are unaffected.
+        header="${HEADER_IN:-${emoji} ${LABEL} — ${status}}"
+        [ -n "${COLOR_IN:-}" ] && color="$COLOR_IN"
+        if [ -n "${STATUS_IN:-}" ]; then
+          field1_label="Status"; field1_value="$STATUS_IN"
+        else
+          field1_label="Version"; field1_value="$version"
+        fi
+
         # Build date in UTC (YYYY.MM.DD), shown on the card so the deploy date is
         # unambiguous rather than inferred from Slack's local-timezone timestamp.
         built_utc="$(date -u +%Y.%m.%d)"
@@ -95,15 +130,16 @@ runs:
           pr_url="$(jq -r '.html_url // ""' <<<"$sel")"
           pr_user="$(jq -r '.user.login // "unknown"' <<<"$sel")"
           payload="$(jq -n \
-            --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
-            --arg version "$version" --arg prlabel "${TARGET_REPO}#${pr_num}" --arg title "$pr_title" \
+            --arg color "$color" --arg header "$header" \
+            --arg f1label "$field1_label" --arg f1value "$field1_value" \
+            --arg prlabel "${TARGET_REPO}#${pr_num}" --arg title "$pr_title" \
             --arg user "$pr_user" --arg runurl "$RUN_URL" --arg prurl "$pr_url" \
             --arg built "$built_utc" '
             def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
             { attachments: [{ color: $color, blocks: [
                 { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
                 { type:"section", fields:[
-                    { type:"mrkdwn", text:("*Version*\n" + $version) },
+                    { type:"mrkdwn", text:("*" + $f1label + "*\n" + $f1value) },
                     { type:"mrkdwn", text:("*PR*\n" + (if $prurl != "" then "<" + $prurl + "|" + $prlabel + ">" else $prlabel end)) } ]},
                 { type:"section", text:{ type:"mrkdwn", text:("*" + ($title|esc) + "*") } },
                 { type:"context", elements:[
@@ -119,15 +155,16 @@ runs:
           if [ -n "$c_subject" ]; then
             # Commit card: subject + short SHA (linked) + author.
             payload="$(jq -n \
-              --arg color "$color" --arg header "${emoji} ${LABEL} — ${status}" \
-              --arg version "$version" --arg short "$short_sha" --arg cmurl "$c_url" \
+              --arg color "$color" --arg header "$header" \
+              --arg f1label "$field1_label" --arg f1value "$field1_value" \
+              --arg short "$short_sha" --arg cmurl "$c_url" \
               --arg subject "$c_subject" --arg user "$c_author" --arg runurl "$RUN_URL" \
               --arg built "$built_utc" '
               def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
               { attachments: [{ color: $color, blocks: [
                   { type:"header", text:{ type:"plain_text", text:$header, emoji:true } },
                   { type:"section", fields:[
-                      { type:"mrkdwn", text:("*Version*\n" + $version) },
+                      { type:"mrkdwn", text:("*" + $f1label + "*\n" + $f1value) },
                       { type:"mrkdwn", text:("*Commit*\n" + (if $cmurl != "" then "<" + $cmurl + "|" + $short + ">" else "`" + $short + "`" end)) } ]},
                   { type:"section", text:{ type:"mrkdwn", text:("*" + ($subject|esc) + "*") } },
                   { type:"context", elements:[
