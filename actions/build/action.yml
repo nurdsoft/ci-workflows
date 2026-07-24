@@ -1,9 +1,16 @@
 name: Build
 description: >-
-  Produce a deployable artifact. Runs `run` if given, otherwise `<runner> build`
+  Produce a deployable build. Runs `run` if given, otherwise `<runner> build`
   (default make) -- so no Makefile is required when `run` is supplied. Optionally
   prepares a Node/Expo toolchain and authenticates to a cloud (for registry
-  pushes performed by the build command). Can upload the output as an artifact.
+  pushes performed by the build command). Can hand the output to the deploy job
+  via the Actions cache (output: cache).
+
+  Cache handoff: output: cache saves the build output under a caller-supplied
+  cache-key. The key must be unique per run (e.g. include github.run_id) and
+  match the deploy side; deploy restores it with an exact-key lookup and fails on
+  a miss, so a cache eviction surfaces as a loud failure rather than a silent
+  empty deploy.
 
   Docker path: when `image-name` is set the action switches to a Docker build+push
   flow -- authenticates via WIF, optionally fetches build-time env vars from Secret
@@ -45,21 +52,20 @@ inputs:
     required: false
     default: ""
   output:
-    description: "Artifact handling: artifact | none."
+    description: "Output handling: cache | none."
     required: false
     default: none
-  artifact-name:
-    description: Name of the uploaded artifact (when output is artifact).
-    required: false
-    default: build-output
   build-output-path:
-    description: Directory uploaded as the artifact.
+    description: Directory saved to the cache (when output is cache).
     required: false
     default: out
-  artifact-retention-days:
-    description: Artifact retention.
+  cache-key:
+    description: >-
+      Cache key for the build output when output is cache. Must be unique per
+      run (e.g. include github.sha and github.run_id) and match the deploy
+      side's cache-key. Required when output is cache.
     required: false
-    default: "7"
+    default: ""
 
   # -- Shared cloud auth inputs -----------------------------------------------
   gcp-wif-provider:
@@ -171,13 +177,12 @@ runs:
           $RUNNER build ENV="$ENV"
         fi
 
-    - name: Upload artifact
-      if: inputs.output == 'artifact' && inputs.image-name == '' && inputs.ghcr-image == ''
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+    - name: Save build cache
+      if: inputs.output == 'cache' && inputs.image-name == '' && inputs.ghcr-image == ''
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
       with:
-        name: ${{ inputs.artifact-name }}
         path: ${{ inputs.build-output-path }}
-        retention-days: ${{ inputs.artifact-retention-days }}
+        key: ${{ inputs.cache-key }}
 
     # -- Docker build path -----------------------------------------------------
     - name: Configure Docker for Artifact Registry (build path)
