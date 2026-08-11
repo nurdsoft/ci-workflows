@@ -315,9 +315,10 @@ card above.
 | `color` | no | `''` | Alert-card bar color (hex, e.g. `#F9A825`). Only takes effect in alert mode. Overrides the result-derived green/red. |
 | `status` | no | `''` | When set, the alert card's first field renders as **Status** with this text in place of the **Version** field. Only takes effect in alert mode. |
 | `channel` | no | `slack` | Chat channel; only `slack` is implemented today. |
-| `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit, the workflow run, and (on failure) the run's jobs. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
+| `github-token` | no | `${{ github.token }}` | Token used to read the PR/commit that `target-repo`/`target-sha` describes. The default job token covers a same-repo deploy; for a cross-org deploy pass a token minted in the caller from a GitHub App with read access to `target-repo`. |
 | `target-repo` | no | `${{ github.repository }}` | `owner/repo` whose PR/commit the card describes. Override for a cross-repo deploy. |
 | `target-sha` | no | `${{ github.sha }}` | Exact built/deployed commit SHA used to resolve the PR/commit. |
+| `run-token` | no | falls back to `github-token` | Token used ONLY for the `/actions/runs/{id}` + `/jobs` lookups that populate `DURATION` and `FAILED AT`. Runs always live in the caller's repo (`github.repository`), so a cross-org `github-token` scoped to `target-repo` can't read them. Pass `${{ github.token }}` when overriding `github-token` cross-org; otherwise leave unset. |
 
 Example — same-repo deploy (token/target default to this repo):
 
@@ -360,6 +361,9 @@ Example — cross-org deploy (card describes a PR/commit in another repo):
           github-token: ${{ steps.app-token.outputs.token }}
           target-repo: other-org/other-repo
           target-sha: ${{ needs.build.outputs.app_sha }}
+          # github-token is scoped to other-org/other-repo and can't read this
+          # repo's Actions API — pass the job's own token for DURATION + FAILED AT.
+          run-token: ${{ github.token }}
 ```
 
 ## enforce — inputs & outputs
