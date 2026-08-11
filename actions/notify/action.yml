@@ -86,9 +86,9 @@ inputs:
       populate DURATION and FAILED AT. Defaults to `github-token` (fine when
       that token has `actions: read` on the current repo). Override when
       `github-token` is a cross-org token minted for `target-repo` and thus
-      has no access to the current repo's Actions API: pass
-      `${{ github.token }}` so the run metadata is read with the job's own
-      token. Requires `actions: read` on the notify job.
+      has no access to the current repo's Actions API: pass the job's own
+      `github.token` so the run metadata is read with it. Requires
+      `actions: read` on the notify job.
     required: false
     default: ""
 
