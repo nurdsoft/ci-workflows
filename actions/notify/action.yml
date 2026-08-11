@@ -80,6 +80,17 @@ inputs:
       commit shown on the card. Defaults to this workflow's commit.
     required: false
     default: ${{ github.sha }}
+  run-token:
+    description: >-
+      Token used ONLY for the /actions/runs/{id} + /jobs API calls that
+      populate DURATION and FAILED AT. Defaults to `github-token` (fine when
+      that token has `actions: read` on the current repo). Override when
+      `github-token` is a cross-org token minted for `target-repo` and thus
+      has no access to the current repo's Actions API: pass the job's own
+      `github.token` so the run metadata is read with it. Requires
+      `actions: read` on the notify job.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -98,9 +109,11 @@ runs:
         WEBHOOK: ${{ inputs.webhook-url }}
         TARGET_REPO: ${{ inputs.target-repo }}
         TARGET_SHA: ${{ inputs.target-sha }}
+        RUN_REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         GH_TOKEN: ${{ inputs.github-token }}
+        RUN_TOKEN: ${{ inputs.run-token }}
       run: |
         set -uo pipefail
 
@@ -108,6 +121,11 @@ runs:
           echo "No SLACK_WEBHOOK_URL configured; skipping notification."
           exit 0
         fi
+
+        # Runs live in github.repository (RUN_REPO), even when target-repo is
+        # a cross-org repo for PR attribution. Fall the run-token back to the
+        # PR-attribution token so single-repo callers keep working unchanged.
+        RUN_TOKEN="${RUN_TOKEN:-$GH_TOKEN}"
 
         # Status icon only. Header emoji conveys success/failure — no separate
         # subtitle line under it.
@@ -200,10 +218,10 @@ runs:
         # -- Duration: pull run_started_at, compute elapsed vs now.
         # Falls back silently if the API call fails.
         duration=""
-        run_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}" 2>/dev/null || echo '{}')"
+        run_json="$(GH_TOKEN="$RUN_TOKEN" gh api "repos/${RUN_REPO}/actions/runs/${RUN_ID}" 2>/dev/null || echo '{}')"
         started_at="$(jq -r '.run_started_at // .created_at // empty' <<<"$run_json")"
         if [ -z "$started_at" ]; then
-          echo "::warning::notify: /actions/runs/${RUN_ID} returned no run_started_at. Check that the notify job grants 'actions: read' — DURATION will not render."
+          echo "::warning::notify: /actions/runs/${RUN_ID} in ${RUN_REPO} returned no run_started_at. Check that the notify job grants 'actions: read' and (for cross-org callers) run-token has access — DURATION will not render."
         fi
         if [ -n "$started_at" ]; then
           started_epoch="$(date -u -d "$started_at" +%s 2>/dev/null || echo '')"
@@ -227,9 +245,9 @@ runs:
         # always human-meaningful and match what users see in the Actions UI.
         failed_step=""
         if [ "$is_success" -eq 0 ]; then
-          jobs_json="$(gh api "repos/${TARGET_REPO}/actions/runs/${RUN_ID}/jobs" 2>/dev/null || echo '{}')"
+          jobs_json="$(GH_TOKEN="$RUN_TOKEN" gh api "repos/${RUN_REPO}/actions/runs/${RUN_ID}/jobs" 2>/dev/null || echo '{}')"
           if [ "$(jq -r '(.jobs // []) | length' <<<"$jobs_json")" = "0" ]; then
-            echo "::warning::notify: /actions/runs/${RUN_ID}/jobs returned no jobs. Check that the notify job grants 'actions: read' — FAILED AT will not render."
+            echo "::warning::notify: /actions/runs/${RUN_ID}/jobs in ${RUN_REPO} returned no jobs. Check that the notify job grants 'actions: read' and (for cross-org callers) run-token has access — FAILED AT will not render."
           fi
           failed_step="$(jq -r '[.jobs[]? | select(.conclusion == "failure")] | .[0].name // ""' <<<"$jobs_json")"
         fi
