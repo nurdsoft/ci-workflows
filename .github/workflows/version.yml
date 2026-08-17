@@ -55,9 +55,14 @@ on:
         type: boolean
         required: false
         default: true
+      expose-latest-on-noops:
+        description: 'When semrel exits without cutting a new tag (rubber-stamp merges into a branch where the release already exists), still expose the latest stable release as outputs.version. Prevents downstream build/deploy/announce steps from falling back to a stale git-describe result across a divergent merge.'
+        type: boolean
+        required: false
+        default: false
     outputs:
       version:
-        description: 'The version produced, or empty if no release was cut.'
+        description: 'The version produced, or empty if no release was cut (unless expose-latest-on-noops is true, in which case the latest stable tag is exposed).'
         value: ${{ jobs.release.outputs.version }}
 
 jobs:
@@ -141,8 +146,27 @@ jobs:
 
       - name: Expose version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPOSE_LATEST_ON_NOOP: ${{ inputs.expose-latest-on-noops }}
         run: |
-          if [ -f .version ]; then echo "version=$(cat .version)" >> "$GITHUB_OUTPUT"; fi
+          if [ -f .version ]; then
+            echo "version=$(cat .version)" >> "$GITHUB_OUTPUT"
+          elif [ "$EXPOSE_LATEST_ON_NOOP" = "true" ]; then
+            # Rubber-stamp path: semrel found no bump because the tag already
+            # exists on a merged branch. `git describe` on divergent histories
+            # can pick the wrong tag by rev-list distance, so read from GH
+            # releases instead — same source semrel itself used.
+            latest=$(gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --exclude-pre-releases \
+              --limit 1 \
+              --json tagName \
+              --jq '.[0].tagName' | sed 's/^v//')
+            if [ -n "$latest" ]; then
+              echo "version=$latest" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
       - name: Commit changelog
         if: |
