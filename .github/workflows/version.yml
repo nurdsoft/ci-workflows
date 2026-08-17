@@ -122,8 +122,16 @@ jobs:
           FORCE_STABLE: ${{ inputs.force-stable }}
         run: |
           set -- --token "$GH_TOKEN" --version-file --allow-no-changes
-          if [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ -n "$RC_LINE" ] && [ "$FORCE_STABLE" != "true" ]; then
-            set -- "$@" --prerelease --maintained-version "$RC_LINE"
+          if [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ]; then
+            if [ "$FORCE_STABLE" = "true" ]; then
+              # go-semantic-release's condition-github plugin refuses a non-default
+              # branch with "configured to only publish from <default>" unless the
+              # config says otherwise. Override defaultBranch so the condition sees
+              # branch==defaultBranch and proceeds.
+              set -- "$@" --ci-condition-opt "defaultBranch=$CURRENT_REF"
+            elif [ -n "$RC_LINE" ]; then
+              set -- "$@" --prerelease --maintained-version "$RC_LINE"
+            fi
           fi
           if { [ "$CURRENT_REF" = "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_DEFAULT" = "true" ]; } || \
              { [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ] && [ "$WITH_CHANGELOG_RC" = "true" ]; }; then
