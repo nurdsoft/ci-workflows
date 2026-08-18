@@ -61,7 +61,8 @@ jobs:
       - uses: nurdsoft/ci-workflows/actions/build@v2
         with:
           run: <your build command>     # or rely on `make build`
-          output: artifact
+          output: cache
+          cache-key: build-${{ github.sha }}-${{ github.run_id }}
 
   deploy:
     needs: [build]
@@ -70,10 +71,18 @@ jobs:
       - uses: nurdsoft/ci-workflows/actions/deploy@v2
         with:
           run: <your deploy command>    # or rely on `make deploy`
-          download-artifact: "true"
+          restore-cache: "true"
+          cache-key: build-${{ github.sha }}-${{ github.run_id }}
           gcp-wif-provider: ${{ secrets.WIF_PROVIDER }}
           gcp-service-account: ${{ secrets.SERVICE_ACCOUNT }}
 ```
+
+The build output is handed to deploy through the Actions cache: `build` saves
+`build-output-path` under `cache-key`, and `deploy` restores it. Pass the same
+**run-unique** `cache-key` to both (include `github.run_id` so re-runs and
+concurrent runs don't collide). The restore is an exact-key match and fails the
+deploy on a miss, so an evicted or missing cache surfaces as a loud failure
+rather than a silent empty deploy.
 
 **App pipeline — Docker + Cloud Run (release, build, deploy)**
 
